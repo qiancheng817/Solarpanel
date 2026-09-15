@@ -17,6 +17,7 @@
     <string name="err_detail">请确认手机与服务器处于同一网络，且服务已启动。</string>
 
     <!-- 菜单 -->
+    <string name="menu_close">关闭并返回首页</string>
     <string name="menu_refresh">刷新</string>
     <string name="menu_change_server">修改服务器地址</string>
     <string name="menu_clear_data">清除缓存与登录状态</string>

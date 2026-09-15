@@ -65,4 +65,48 @@ public final class Urls {
         }
         return value;
     }
+
+    /**
+     * 判断两个地址是否指向同一个页面（用于识别"当前是否还在面板首页"）。
+     *
+     * 比较时忽略查询串与锚点，并把末尾斜杠、默认端口统一掉，
+     * 因此 http://ip:8080、http://ip:8080/、http://ip:8080/#section 会被视作同一页。
+     */
+    public static boolean isSamePage(String left, String right) {
+        String a = pageKey(left);
+        return a != null && a.equals(pageKey(right));
+    }
+
+    private static String pageKey(String raw) {
+        if (raw == null || raw.isEmpty()) {
+            return null;
+        }
+        Uri uri;
+        try {
+            uri = Uri.parse(raw);
+        } catch (Exception e) {
+            return null;
+        }
+        String scheme = uri.getScheme();
+        String host = uri.getHost();
+        if (scheme == null || host == null || host.isEmpty()) {
+            return null;
+        }
+        scheme = scheme.toLowerCase(Locale.ROOT);
+        host = host.toLowerCase(Locale.ROOT);
+
+        int port = uri.getPort();
+        if (port < 0) {
+            port = "https".equals(scheme) ? 443 : 80;
+        }
+
+        String path = uri.getPath();
+        if (path == null || path.isEmpty()) {
+            path = "/";
+        }
+        while (path.length() > 1 && path.endsWith("/")) {
+            path = path.substring(0, path.length() - 1);
+        }
+        return scheme + "://" + host + ":" + port + path;
+    }
 }

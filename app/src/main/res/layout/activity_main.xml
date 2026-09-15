@@ -6,10 +6,33 @@
     android:layout_height="match_parent"
     android:background="@color/app_background">
 
-    <LinearLayout
-        android:id="@+id/mainRoot"
+    <!--
+        网页容器。它整体会被顶栏高度往下推一段（translationY），
+        所以网页顶部不会被顶栏挡住；顶栏收起时这段位移归零，
+        可视区域立刻变大，而且不需要让 WebView 重新布局（不会造成网页回流抖动）。
+    -->
+    <androidx.swiperefreshlayout.widget.SwipeRefreshLayout
+        android:id="@+id/swipeRefresh"
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
+        android:layout_height="match_parent">
+
+        <WebView
+            android:id="@+id/webView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+    </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
+
+    <!--
+        顶栏：覆盖在网页之上，下滑自动收起、上滑自动出现。
+        注意：这里刻意不用 elevation —— FrameLayout 会按 Z 值排序绘制子视图，
+        一旦顶栏有海拔，它就会盖到下面的配置页 / 错误页之上。
+    -->
+    <LinearLayout
+        android:id="@+id/topBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/brand_blue_dark"
         android:orientation="vertical">
 
         <com.google.android.material.appbar.MaterialToolbar
@@ -31,18 +54,11 @@
             android:progressTint="@color/brand_blue"
             android:visibility="gone" />
 
-        <androidx.swiperefreshlayout.widget.SwipeRefreshLayout
-            android:id="@+id/swipeRefresh"
+        <!-- 顶栏下沿的细分隔线，网页内容从下面滚过时层次更清楚 -->
+        <View
             android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="1">
-
-            <WebView
-                android:id="@+id/webView"
-                android:layout_width="match_parent"
-                android:layout_height="match_parent" />
-
-        </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
+            android:layout_height="1dp"
+            android:background="#33000000" />
 
     </LinearLayout>
 

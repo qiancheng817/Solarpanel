@@ -13,12 +13,16 @@ import android.os.Environment;
 import android.text.InputType;
 import android.text.TextUtils;
 import android.util.TypedValue;
+import android.view.MenuItem;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.webkit.CookieManager;
 import android.webkit.HttpAuthHandler;
+import android.webkit.JavascriptInterface;
 import android.webkit.SslErrorHandler;
 import android.webkit.URLUtil;
 import android.webkit.ValueCallback;
@@ -62,6 +66,40 @@ public class MainActivity extends AppCompatActivity {
     private static final int REQUEST_FILE_CHOOSER = 1001;
     private static final long DOUBLE_BACK_INTERVAL_MS = 2000L;
 
+    /** 顶栏收起 / 展开的动画时长。 */
+    private static final long TOP_BAR_ANIM_MS = 180L;
+
+    /** 网页滚动超过这个像素才算一次方向变化，避免惯性滚动末尾顶栏来回闪。 */
+    private static final int SCROLL_EPSILON_PX = 3;
+
+    /** JS 注入不可用时，用手指滑动距离兜底判断方向（约 24dp）。 */
+    private static final int FALLBACK_TOUCH_THRESHOLD_DP = 24;
+
+    /**
+     * 注入到网页里的滚动监听，把滚动方向回报给原生层，用于顶栏自动收放。
+     *
+     * - 挂在 document 的捕获阶段，页面内任意滚动容器（含懒加载列表）都能命中；
+     * - 位移小于 3px 不上报，过滤抖动；
+     * - 带 __solarpanelScrollHook 标记，重复注入不会叠加监听。
+     */
+    private static final String SCROLL_HOOK_JS =
+            "(function(){"
+                    + "if(window.__solarpanelScrollHook){return;}"
+                    + "window.__solarpanelScrollHook=true;"
+                    + "var last=null;"
+                    + "function pos(t){"
+                    + "if(!t||t===document||t===document.body||t===document.documentElement){"
+                    + "return window.pageYOffset||document.documentElement.scrollTop||document.body.scrollTop||0;}"
+                    + "return t.scrollTop||0;}"
+                    + "function fire(d,y){try{SolarpanelHost.onScroll(d,y<=4?1:0);}catch(e){}}"
+                    + "document.addEventListener('scroll',function(ev){"
+                    + "var y=pos(ev.target);"
+                    + "if(last===null){last=y;return;}"
+                    + "var d=y-last;last=y;"
+                    + "if(d>3){fire(d,y);}else if(d<-3){fire(d,y);}"
+                    + "},true);"
+                    + "})();";
+
     /**
      * 自托管服务常使用自签名证书，严格校验会导致整站无法访问。
      * 若你使用受信任的正式证书，可把这里改为 false 以恢复严格校验。
@@ -72,6 +110,7 @@ public class MainActivity extends AppCompatActivity {
     private SwipeRefreshLayout swipeRefresh;
     private ProgressBar progressBar;
     private MaterialToolbar toolbar;
+    private View topBar;
     private View setupPanel;
     private View errorPanel;
     private TextInputLayout serverInputLayout;
@@ -85,6 +124,15 @@ public class MainActivity extends AppCompatActivity {
     private boolean sslWarningShown;
     private long lastBackPressedAt;
 
+    /** 顶栏实测高度（首次布局后取得）。 */
+    private int topBarHeight;
+    private boolean topBarHidden;
+    /** 顶栏是否已按首帧状态就位，避免第一次切换时播一段没必要的动画。 */
+    private boolean topBarSettled;
+    /** 网页是否已经开始上报滚动（正常情况恒为 true）。 */
+    private volatile boolean jsScrollHookAlive;
+    private float touchAnchorY;
+
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -96,6 +144,8 @@ public class MainActivity extends AppCompatActivity {
         configureWebViewClient();
         configureDownloadListener();
         configureToolbar();
+        configureTopBar();
+        configureScrollHiding();
         configureBackHandling();
         configureSetupPanel();
 
@@ -116,6 +166,7 @@ public class MainActivity extends AppCompatActivity {
         swipeRefresh = findViewById(R.id.swipeRefresh);
         progressBar = findViewById(R.id.progressBar);
         toolbar = findViewById(R.id.toolbar);
+        topBar = findViewById(R.id.topBar);
         setupPanel = findViewById(R.id.setupPanel);
         errorPanel = findViewById(R.id.errorPanel);
         serverInputLayout = findViewById(R.id.serverInputLayout);
@@ -159,6 +210,9 @@ public class MainActivity extends AppCompatActivity {
 
         webView.setBackgroundColor(ContextCompat.getColor(this, R.color.app_background));
         WebView.setWebContentsDebuggingEnabled(false);
+
+        // 暴露给网页的最小接口：只用来上报滚动方向，供顶栏自动收放使用
+        webView.addJavascriptInterface(new ScrollBridge(), "SolarpanelHost");
 
         swipeRefresh.setColorSchemeResources(R.color.brand_blue_dark, R.color.brand_tan_dark);
         swipeRefresh.setOnRefreshListener(() -> {
@@ -233,6 +287,8 @@ public class MainActivity extends AppCompatActivity {
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 mainFrameFailed = false;
                 swipeRefresh.setRefreshing(false);
+                // 新页面开始加载时先把顶栏放出来，进度条与关闭按钮才看得见
+                applyTopBarState(false, true);
             }
 
             @Override
@@ -241,6 +297,16 @@ public class MainActivity extends AppCompatActivity {
                 if (!mainFrameFailed) {
                     hideErrorPanel();
                 }
+                injectScrollHook();
+                updateCloseButton();
+            }
+
+            @SuppressWarnings("deprecation")
+            @Override
+            public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
+                // SPA 路由切换（pushState）不会触发 onPageFinished，这里补一次
+                injectScrollHook();
+                updateCloseButton();
             }
 
             @Override
@@ -287,6 +353,10 @@ public class MainActivity extends AppCompatActivity {
     private void configureToolbar() {
         toolbar.setOnMenuItemClickListener(item -> {
             int id = item.getItemId();
+            if (id == R.id.action_close) {
+                goHome();
+                return true;
+            }
             if (id == R.id.action_refresh) {
                 if (webView.getUrl() != null) {
                     webView.reload();
@@ -363,6 +433,148 @@ public class MainActivity extends AppCompatActivity {
         };
         findViewById(R.id.errorRetryButton).setOnClickListener(retry);
         findViewById(R.id.errorChangeButton).setOnClickListener(v -> showSetupPanel(Prefs.getServer(this)));
+    }
+
+    // ------------------------------------------------------------------
+    // 顶栏自动收放 + 关闭按钮
+    // ------------------------------------------------------------------
+
+    /**
+     * 顶栏（含进度条）覆盖在网页之上，网页容器整体被顶栏高度向下推一段，
+     * 这样网页顶部不会被顶栏遮挡；顶栏收起时这段位移归零，
+     * 可视区域立刻变大，且完全不需要让 WebView 重新布局（网页不会回流、不抖动）。
+     */
+    private void configureTopBar() {
+        topBar.getViewTreeObserver().addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
+            @Override
+            public boolean onPreDraw() {
+                topBar.getViewTreeObserver().removeOnPreDrawListener(this);
+                topBarHeight = topBar.getHeight();
+                applyTopBarState(false, false);   // 首帧就位，避免闪一帧错位
+                return true;
+            }
+        });
+    }
+
+    private void configureScrollHiding() {
+        // 正常路径：网页里的滚动位置由注入的 JS 上报（见 SCROLL_HOOK_JS）。
+        // 兜底路径：万一 JS 注入没生效（页面禁用脚本，或内容在 iframe 里滚动），
+        // 就用手指的滑动方向判断——往上滑收起顶栏、往下滑放出来。
+        // 两条路径不会打架：只要 JS 上报过一次，兜底就自动让位。
+        webView.setOnTouchListener((v, event) -> {
+            if (jsScrollHookAlive) {
+                return false;
+            }
+            float threshold = FALLBACK_TOUCH_THRESHOLD_DP
+                    * getResources().getDisplayMetrics().density;
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    touchAnchorY = event.getY();
+                    break;
+                case MotionEvent.ACTION_MOVE:
+                    float moved = touchAnchorY - event.getY();
+                    if (moved > threshold) {
+                        applyTopBarState(true, true);
+                        touchAnchorY = event.getY();
+                    } else if (moved < -threshold) {
+                        applyTopBarState(false, true);
+                        touchAnchorY = event.getY();
+                    }
+                    break;
+                default:
+                    break;
+            }
+            return false;   // 不消费事件，网页照常滚动
+        });
+    }
+
+    /**
+     * 收起或展开顶栏。
+     *
+     * @param hide    true 收起，false 展开
+     * @param animate 是否播放动画
+     */
+    private void applyTopBarState(boolean hide, boolean animate) {
+        if (topBarHeight <= 0) {
+            return;
+        }
+        float barTarget = hide ? -topBarHeight : 0f;
+        float contentTarget = hide ? 0f : topBarHeight;
+
+        if (!topBarSettled) {
+            topBarSettled = true;
+            topBarHidden = hide;
+            topBar.setTranslationY(barTarget);
+            swipeRefresh.setTranslationY(contentTarget);
+            return;
+        }
+        if (topBarHidden == hide) {
+            return;
+        }
+        topBarHidden = hide;
+
+        if (!animate) {
+            topBar.setTranslationY(barTarget);
+            swipeRefresh.setTranslationY(contentTarget);
+            return;
+        }
+        topBar.animate().cancel();
+        swipeRefresh.animate().cancel();
+        topBar.animate()
+                .translationY(barTarget)
+                .setDuration(TOP_BAR_ANIM_MS)
+                .start();
+        swipeRefresh.animate()
+                .translationY(contentTarget)
+                .setDuration(TOP_BAR_ANIM_MS)
+                .start();
+    }
+
+    private void injectScrollHook() {
+        webView.evaluateJavascript(SCROLL_HOOK_JS, null);
+    }
+
+    /** 只有在"当前不在面板首页"时，顶栏才显示关闭按钮。 */
+    private void updateCloseButton() {
+        MenuItem item = toolbar.getMenu().findItem(R.id.action_close);
+        if (item == null) {
+            return;
+        }
+        String home = Prefs.getServer(this);
+        boolean atHome = !TextUtils.isEmpty(home) && Urls.isSamePage(webView.getUrl(), home);
+        item.setVisible(!atHome);
+    }
+
+    /** 关闭当前服务页面，回到面板首页。 */
+    private void goHome() {
+        String home = Prefs.getServer(this);
+        if (TextUtils.isEmpty(home)) {
+            showSetupPanel("");
+            return;
+        }
+        if (Urls.isSamePage(webView.getUrl(), home)) {
+            return;
+        }
+        applyTopBarState(false, true);
+        webView.loadUrl(home);
+    }
+
+    /** 暴露给网页的最小接口，只用来上报滚动方向。 */
+    private final class ScrollBridge {
+
+        @JavascriptInterface
+        public void onScroll(int delta, int atTop) {
+            // 该回调在 WebView 的 JavaBridge 线程上执行，必须切回主线程动 UI
+            jsScrollHookAlive = true;
+            boolean atTopOfPage = atTop != 0;
+            if (delta < -SCROLL_EPSILON_PX || atTopOfPage) {
+                // 往上滚，或已经回到顶部：展开顶栏
+                runOnUiThread(() -> applyTopBarState(false, true));
+            } else if (delta > SCROLL_EPSILON_PX) {
+                // 往下滚：收起顶栏，把空间让给内容
+                runOnUiThread(() -> applyTopBarState(true, true));
+            }
+        }
     }
 
     // ------------------------------------------------------------------
