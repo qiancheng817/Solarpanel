@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  自托管场景专用配置：
+  1) cleartextTrafficPermitted="true"  —— 允许 http:// 访问局域网内的飞牛/群晖等自建服务；
+  2) trust-anchors 同时信任系统证书与用户证书 —— 便于把自签 CA 装进系统后正常使用 https。
+  注意：这会降低默认的传输安全等级。本应用仅用于访问你自己部署的服务，
+  请勿用于访问不受信任的公网站点。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

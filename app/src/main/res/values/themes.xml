@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <style name="Theme.Solarpanel" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/brand_blue_dark</item>
+        <item name="colorOnPrimary">@color/white</item>
+        <item name="colorSecondary">@color/brand_tan_dark</item>
+        <item name="colorOnSecondary">@color/white</item>
+        <item name="android:windowBackground">@color/app_background</item>
+        <item name="android:statusBarColor">@color/brand_blue_dark</item>
+        <item name="android:navigationBarColor">@color/app_background</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+
+    <style name="TextAppearance.Solarpanel.Title" parent="TextAppearance.Material3.TitleLarge">
+        <item name="android:textColor">@color/app_text_primary</item>
+    </style>
+
+    <style name="TextAppearance.Solarpanel.Body" parent="TextAppearance.Material3.BodyMedium">
+        <item name="android:textColor">@color/app_text_secondary</item>
+    </style>
+
+</resources>

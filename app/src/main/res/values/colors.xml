@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="white">#FFFFFFFF</color>
+
+    <!-- 取自应用图标：米白底 + 天蓝 + 暖橙 -->
+    <color name="brand_blue">#7FB9DB</color>
+    <color name="brand_blue_dark">#3E7FA8</color>
+    <color name="brand_tan">#E4C092</color>
+    <color name="brand_tan_dark">#C08A55</color>
+
+    <!-- 图标背景色（自适应图标背景层），取自原图圆盘实测底色 -->
+    <color name="ic_launcher_background">#EFF0F4</color>
+
+    <color name="app_background">#F7F6F2</color>
+    <color name="app_text_primary">#1F2933</color>
+    <color name="app_text_secondary">#6B7280</color>
+</resources>

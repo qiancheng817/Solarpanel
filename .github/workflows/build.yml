@@ -1,0 +1,128 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Ensure required SDK packages
+        run: |
+          set +e
+          SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "${ANDROID_HOME}" -name sdkmanager -type f 2>/dev/null | head -n 1)"
+          fi
+          echo "ANDROID_HOME=${ANDROID_HOME}"
+          echo "sdkmanager=${SDKMANAGER}"
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1
+          "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          echo "android-34 and build-tools 34.0.0 are ready"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Prepare signing keystore
+        id: keystore
+        run: |
+          set -e
+          if [ -f keystore/solarpanel.jks ]; then
+            echo "Using the keystore committed in the repository."
+            echo "generated=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "No keystore found, generating a new one."
+            mkdir -p keystore
+            keytool -genkeypair -v \
+              -keystore keystore/solarpanel.jks \
+              -alias solarpanel \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass solarpanel -keypass solarpanel \
+              -dname "CN=Solarpanel, OU=Self-hosted, O=Solarpanel, L=Local, ST=Local, C=CN"
+            echo "generated=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build release APK
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Collect APK
+        id: apk
+        run: |
+          set -e
+          VERSION="$(grep -oP 'versionName\s+"\K[^"]+' app/build.gradle | head -n 1)"
+          SRC="$(find app/build/outputs/apk/release -maxdepth 1 -name '*.apk' | head -n 1)"
+          mkdir -p dist
+          DEST="dist/Solarpanel-${VERSION}.apk"
+          cp "$SRC" "$DEST"
+          echo "Built $DEST"
+          ls -lh dist
+          echo "apk_path=$DEST" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Verify APK
+        run: |
+          set +e
+          AAPT="$(find "${ANDROID_HOME}/build-tools" -name aapt2 -type f | head -n 1)"
+          echo "--- aapt2 dump badging ---"
+          "$AAPT" dump badging "${{ steps.apk.outputs.apk_path }}" 2>/dev/null | head -n 15
+          echo "--- apksigner verify ---"
+          APKSIGNER="$(find "${ANDROID_HOME}/build-tools" -name apksigner -type f | head -n 1)"
+          "$APKSIGNER" verify --print-certs "${{ steps.apk.outputs.apk_path }}" 2>&1 | head -n 12
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Solarpanel-APK
+          path: ${{ steps.apk.outputs.apk_path }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload generated keystore
+        if: steps.keystore.outputs.generated == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: signing-keystore
+          path: keystore/solarpanel.jks
+          retention-days: 7
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.apk.outputs.version }}
+          name: Solarpanel v${{ steps.apk.outputs.version }}
+          body: |
+            自托管 Solarpanel 导航面板的安卓客户端。
+
+            - 应用名：Solarpanel
+            - versionName：${{ steps.apk.outputs.version }}
+            - 所有页面在应用内打开，不跳转外部浏览器
+            - 首次启动需填写你部署在飞牛 / NAS 上的 Solarpanel 地址
+
+            安装方式：下载下方的 APK，在手机上允许「安装未知来源应用」后直接安装。
+          files: ${{ steps.apk.outputs.apk_path }}
+          draft: false
+          make_latest: true
