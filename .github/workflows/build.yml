@@ -27,20 +27,33 @@ jobs:
           java-version: '17'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Ensure required SDK packages
+        env:
+          ANDROID_HOME_FALLBACK: /usr/local/lib/android/sdk
         run: |
-          set +e
-          SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
-          if [ ! -x "$SDKMANAGER" ]; then
-            SDKMANAGER="$(find "${ANDROID_HOME}" -name sdkmanager -type f 2>/dev/null | head -n 1)"
+          set -e
+          SDK_HOME="${ANDROID_HOME:-$ANDROID_HOME_FALLBACK}"
+          echo "ANDROID_HOME=$SDK_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_HOME" >> "$GITHUB_ENV"
+          echo "sdk.dir=$SDK_HOME" > local.properties
+          echo "ANDROID_HOME=$SDK_HOME"
+          ls -1 "$SDK_HOME" || true
+
+          SM="$SDK_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SM" ]; then
+            SM="$(find "$SDK_HOME" -maxdepth 4 -name sdkmanager -type f 2>/dev/null | head -n 1)"
           fi
-          echo "ANDROID_HOME=${ANDROID_HOME}"
-          echo "sdkmanager=${SDKMANAGER}"
-          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1
-          "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
-          echo "android-34 and build-tools 34.0.0 are ready"
+          echo "sdkmanager=$SM"
+          if [ -z "$SM" ] || [ ! -x "$SM" ]; then
+            echo "::error::sdkmanager not found under $SDK_HOME"
+            exit 1
+          fi
+
+          yes | "$SM" --licenses > /dev/null 2>&1 || true
+          "$SM" --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          echo "---- platforms ----"
+          ls -1 "$SDK_HOME/platforms"
+          echo "---- build-tools ----"
+          ls -1 "$SDK_HOME/build-tools"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
