@@ -164,44 +164,35 @@ public class MainActivity extends AppCompatActivity {
                     + "})();";
 
     /**
-     * 给上游面板的 renderBase() 打补丁，让它尊重 App 设置的网络模式。
+     * 把 App 设定的网络模式应用到上游面板。
      *
-     * 上游 renderBase() 每次调用都会无条件执行
-     *   state.lanMode = s.default_lan_mode === 'lan'
-     * 把 App 通过 evaluateJavascript 注入的 state.lanMode 覆盖回去，
-     * 导致 App 切了内网模式，下次打开面板又被重置成外网。
+     * 上游 boot() 里 API.get() 是异步的，await 返回后会调 renderBase()，
+     * renderBase() L219 无条件执行 state.lanMode = s.default_lan_mode === 'lan'，
+     * 会把 App 注入的 state.lanMode 覆盖回后端默认值。
      *
-     * 这个 hook 把 renderBase 包一层：先让它跑原逻辑（完成主题、时钟等渲染），
-     * 再把 state.lanMode 改回 App 设定的值并触发 renderGroups() 重渲染卡片。
-     * 同时把包装后的 renderBase 存在 window 上，面板后续任何地方调 renderBase
-     * 都会自动尊重 App 的网络模式。
+     * 之前的做法是包装 renderBase 让它每次都覆盖回来，但这在访客密码锁屏页
+     * （renderBase 被调时 groups 还没加载）可能干扰面板自身的状态渲染。
      *
-     * 幂等：window.__renderBaseHooked 标记保证只包装一次，后续页面重载会重新注入。
+     * 新做法：不碰 renderBase，只设 window.__appLanMode 标记，
+     * 然后用 setTimeout 等 boot() 跑完（API.get 返回 + renderBase + renderGroups 都执行完），
+     * 再覆盖 state.lanMode 并重渲染卡片。
+     * 正常面板首页 API.get 一般在 100-300ms 内返回，延迟 500ms 足够。
+     * 访客密码锁屏页 boot() 会提前 return，500ms 后 state.groups 仍是空数组，
+     * renderGroups 有 length>0 守卫会跳过，不干扰锁屏。
      */
     private static final String NETWORK_MODE_HOOK_JS =
-            "(function(){"
-                    + "if(window.__renderBaseHooked){return;}"
-                    + "if(typeof renderBase!=='function'){return;}"
-                    + "var orig=renderBase;"
-                    + "renderBase=function(){"
-                    + "orig.apply(this,arguments);"
-                    + "if(window.__appLanMode!==undefined"
-                    + "&&typeof state!=='undefined'&&state!==null"
-                    + "&&state.groups&&state.groups.length>0){"
-                    + "state.lanMode=window.__appLanMode;"
-                    + "if(typeof renderGroups==='function'){renderGroups();}"
-                    + "}"
-                    + "};"
-                    + "window.__renderBaseHooked=true;"
-                    + "})();"
+            "(function(){try{"
+                    + "window.__appLanMode=%s;"
+                    + "setTimeout(function(){"
                     + "try{"
                     + "if(typeof state!=='undefined'&&state!==null"
-                    + "&&window.__appLanMode!==undefined"
                     + "&&state.groups&&state.groups.length>0){"
                     + "state.lanMode=window.__appLanMode;"
                     + "if(typeof renderGroups==='function'){renderGroups();}"
                     + "}"
-                    + "}catch(e){}";
+                    + "}catch(e){}"
+                    + "},500);"
+                    + "}catch(e){})()";
 
     /** 切换按钮点了之后，直接改 window.__appLanMode + state.lanMode 并重渲染。 */
     private static final String NETWORK_TOGGLE_JS_TEMPLATE =
@@ -953,16 +944,11 @@ public class MainActivity extends AppCompatActivity {
 
     /**
      * 把当前网络模式（lan/wan）应用到面板页面。
-     * 先给 renderBase 打 hook（幂等），再设 window.__appLanMode + state.lanMode + 重渲染。
-     * renderBase hook 保证后续任何 renderBase 调用都尊重 App 的选择，
-     * 不会再被上游的 default_lan_mode 覆盖回去。
+     * 不碰 renderBase，只设 window.__appLanMode + setTimeout 等 boot() 跑完再覆盖 state.lanMode。
      */
     private void applyNetworkModeToPage() {
-        // 先注入 hook（如果页面还没 hook 过）
-        webView.evaluateJavascript(NETWORK_MODE_HOOK_JS, null);
-        // 再设 App 标记 + 直接生效
         boolean lan = "lan".equals(Prefs.getNetworkMode(this));
-        String js = String.format(NETWORK_TOGGLE_JS_TEMPLATE, lan ? "true" : "false", lan ? "true" : "false");
+        String js = String.format(NETWORK_MODE_HOOK_JS, lan ? "true" : "false");
         webView.evaluateJavascript(js, null);
     }
 
