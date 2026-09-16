@@ -1,15 +1,20 @@
 package com.solarpanel.app;
 
+import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.DownloadManager;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.net.Uri;
 import android.net.http.SslError;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.InputType;
 import android.text.TextUtils;
 import android.util.TypedValue;
@@ -29,6 +34,7 @@ import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebStorage;
 import android.webkit.WebView;
@@ -38,9 +44,9 @@ import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.Toast;
 
-import android.widget.FrameLayout;
-
 import androidx.activity.OnBackPressedCallback;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
@@ -50,7 +56,19 @@ import com.google.android.material.appbar.MaterialToolbar;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.textfield.TextInputLayout;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Solarpanel 安卓客户端。
@@ -82,19 +100,39 @@ public class MainActivity extends AppCompatActivity {
      *
      * - 挂在 document 的捕获阶段，页面内任意滚动容器（含懒加载列表）都能命中；
      * - 位移小于 3px 不上报，过滤抖动；
-     * - 带 __solarpanelScrollHook 标记，重复注入不会叠加监听。
+     * - 带 __solarpanelScrollHook 标记，重复注入不会叠加监听；
+     * - 识别捏合缩放：双指缩放期间 scrollTop 也会抖动变化，如果不拦截顶栏会疯狂闪烁，
+     *   所以用 touchstart/touchmove 的触点数量判断是否正在缩放，同时监听 visualViewport.scale。
+     *   缩放结束后冷却 300ms 再恢复上报，避免缩放收尾的 scrollTop 回弹误触发。
      */
     private static final String SCROLL_HOOK_JS =
             "(function(){"
                     + "if(window.__solarpanelScrollHook){return;}"
                     + "window.__solarpanelScrollHook=true;"
                     + "var last=null;"
+                    + "var pinchActive=false;"
+                    + "var pinchCooldownUntil=0;"
                     + "function pos(t){"
                     + "if(!t||t===document||t===document.body||t===document.documentElement){"
                     + "return window.pageYOffset||document.documentElement.scrollTop||document.body.scrollTop||0;}"
                     + "return t.scrollTop||0;}"
+                    + "function scaleNotDefault(){"
+                    + "try{return window.visualViewport&&Math.abs(window.visualViewport.scale-1)>0.05;}catch(e){return false;}}"
+                    + "function zoomingNow(){"
+                    + "return pinchActive||scaleNotDefault()||Date.now()<pinchCooldownUntil;}"
                     + "function fire(d,y){try{SolarpanelHost.onScroll(d,y<=4?1:0);}catch(e){}}"
+                    + "document.addEventListener('touchstart',function(ev){"
+                    + "if(ev.touches&&ev.touches.length>=2){"
+                    + "pinchActive=true;}"
+                    + "},true);"
+                    + "document.addEventListener('touchmove',function(ev){"
+                    + "if(ev.touches&&ev.touches.length>=2){pinchActive=true;}"
+                    + "},true);"
+                    + "document.addEventListener('touchend',function(ev){"
+                    + "if(ev.touches&&ev.touches.length>=2){pinchActive=true;}else{pinchActive=false;pinchCooldownUntil=Date.now()+300;}"
+                    + "},true);"
                     + "document.addEventListener('scroll',function(ev){"
+                    + "if(zoomingNow()){last=null;return;}"
                     + "var y=pos(ev.target);"
                     + "if(last===null){last=y;return;}"
                     + "var d=y-last;last=y;"
@@ -133,17 +171,29 @@ public class MainActivity extends AppCompatActivity {
      * 「清除」名不副实。这段脚本在清除数据时执行：注销全部 SW 注册并清空
      * Cache Storage。页面在非安全上下文（HTTP 内网地址）下本来就没有 SW，
      * 脚本各分支都会自动跳过，不会有副作用。
+     *
+     * 实现要点：把 SW 注销和 Cache 删除两个异步操作包进 Promise.all，
+     * 完成后再通过 JavaScriptInterface 回调原生层，确保后续的 Cookie 清理
+     * 和 loadUrl 不会抢在 SW 清理完成之前执行。
      */
     private static final String PANEL_SW_CLEANUP_JS =
             "(function(){"
+                    + "var pending=[];"
                     + "try{"
                     + "if(navigator.serviceWorker&&navigator.serviceWorker.getRegistrations){"
-                    + "navigator.serviceWorker.getRegistrations().then(function(rs){"
-                    + "rs.forEach(function(r){try{r.unregister();}catch(e){}});}).catch(function(){});}"
+                    + "pending.push(navigator.serviceWorker.getRegistrations().then(function(rs){"
+                    + "rs.forEach(function(r){try{r.unregister();}catch(e){}});"
+                    + "}).catch(function(){}));}"
                     + "if(window.caches&&caches.keys){"
-                    + "caches.keys().then(function(ks){"
-                    + "ks.forEach(function(k){try{caches.delete(k);}catch(e){}});}).catch(function(){});}"
+                    + "pending.push(caches.keys().then(function(ks){"
+                    + "ks.forEach(function(k){try{caches.delete(k);}catch(e){}});"
+                    + "}).catch(function(){}));}"
                     + "}catch(e){}"
+                    + "Promise.all(pending).then(function(){"
+                    + "try{SolarpanelHost.onSwCleanupDone();}catch(e){}"
+                    + "}).catch(function(){"
+                    + "try{SolarpanelHost.onSwCleanupDone();}catch(e){}"
+                    + "});"
                     + "})();";
 
     /**
@@ -153,7 +203,6 @@ public class MainActivity extends AppCompatActivity {
     private static final boolean ALLOW_SELF_SIGNED_CERTIFICATE = true;
 
     private WebView webView;
-    private FrameLayout swipeRefresh;
     private ProgressBar progressBar;
     private MaterialToolbar toolbar;
     private View topBar;
@@ -169,6 +218,23 @@ public class MainActivity extends AppCompatActivity {
     private boolean mainFrameFailed;
     private boolean sslWarningShown;
     private long lastBackPressedAt;
+    /** 等待 Service Worker 清理完成后继续执行的回调；仅在 clearWebData 过程中非 null。 */
+    private Runnable swCleanupContinuation;
+
+    /** clearWebData 里给 SW 清理加的 3 秒超时处理器，用于在 onDestroy 里移除。 */
+    private final Handler swCleanupTimeoutHandler = new Handler(Looper.getMainLooper());
+    private final Runnable swCleanupTimeoutRunnable = () -> {
+        Runnable cont = swCleanupContinuation;
+        if (cont != null) {
+            swCleanupContinuation = null;
+            cont.run();
+        }
+    };
+
+    /** Android 13+ 请求通知权限的 launcher；下载完成通知依赖该权限。 */
+    private ActivityResultLauncher<String> notificationPermissionLauncher;
+    /** 等待通知权限授予后再执行的下载任务；仅在权限请求进行中非 null。 */
+    private Runnable pendingDownload;
 
     /** 顶栏实测高度（首次布局后取得）。 */
     private int topBarHeight;
@@ -182,6 +248,21 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        // ActivityResultLauncher 必须在 setContentView 之前注册
+        notificationPermissionLauncher = registerForActivityResult(
+                new ActivityResultContracts.RequestPermission(),
+                granted -> {
+                    Runnable dl = pendingDownload;
+                    pendingDownload = null;
+                    if (dl != null) {
+                        if (!granted) {
+                            toast(R.string.toast_notification_denied);
+                        }
+                        dl.run();
+                    }
+                });
+
         setContentView(R.layout.activity_main);
 
         bindViews();
@@ -209,7 +290,6 @@ public class MainActivity extends AppCompatActivity {
 
     private void bindViews() {
         webView = findViewById(R.id.webView);
-        swipeRefresh = findViewById(R.id.swipeRefresh);
         progressBar = findViewById(R.id.progressBar);
         toolbar = findViewById(R.id.toolbar);
         topBar = findViewById(R.id.topBar);
@@ -238,6 +318,7 @@ public class MainActivity extends AppCompatActivity {
         settings.setSupportZoom(true);
         settings.setBuiltInZoomControls(true);
         settings.setDisplayZoomControls(false);
+        settings.setTextZoom(100);   // 锁定系统"字体大小"设置，防止面板卡片布局因系统放缩错乱
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
 
@@ -247,7 +328,13 @@ public class MainActivity extends AppCompatActivity {
 
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
 
-        userAgent = settings.getUserAgentString() + " SolarpanelAndroid/" + BuildConfig.VERSION_NAME;
+        // 强制桌面端 UA：不含 "Mobile" 标记，让 fnOS / 飞牛等桌面端服务器返回桌面布局。
+        // Solarpanel 自己的面板有 viewport meta + 响应式 CSS，即使收到桌面 UA 也会按 device-width 正确渲染。
+        // 相当于 Chrome 浏览器里的 "桌面版网站" 模式。
+        userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                + "AppleWebKit/537.36 (KHTML, like Gecko) "
+                + "Chrome/126.0.6478.126 Safari/537.36 "
+                + "SolarpanelAndroid/" + BuildConfig.VERSION_NAME;
         settings.setUserAgentString(userAgent);
 
         CookieManager cookieManager = CookieManager.getInstance();
@@ -320,9 +407,65 @@ public class MainActivity extends AppCompatActivity {
                 return handleUri(Uri.parse(url));
             }
 
+            /**
+             * 网络层拦截：对外部页面（非 Solarpanel 自己）的主文档 HTML，
+             * 抓取后在返回给 WebView 之前把 <meta name="viewport"> 删除。
+             *
+             * 这和 Chrome 浏览器的「桌面版网站」模式原理一致——
+             * 渲染引擎从第一帧开始就看不到 viewport meta，
+             * 自然会用默认 ~980px 桌面宽度渲染，再配合
+             * setUseWideViewPort(true) + setLoadWithOverviewMode(true) +
+             * setInitialScale(0) 自动等比缩小到手机屏幕。
+             *
+             * 之前用 evaluateJavascript 事后删除 viewport meta 是错的——
+             * 等到 JS 能执行时，渲染引擎已经按 360px 完成了 layout + paint。
+             */
+            @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                if (!request.isForMainFrame()) {
+                    return null;   // 只拦主文档，图片/JS/CSS 等子资源放行
+                }
+                // 只拦截 GET 主文档请求。
+                // POST（如表单登录提交）等带 body 的请求必须交给 WebView 原生处理，
+                // 否则 fetchAndStripViewport 会把 POST 强转成 GET，body 被丢弃，
+                // 服务器因收不到凭据而返回原登录页——表现为"点登录后页面刷新但登不上"。
+                String method = request.getMethod();
+                if (!"GET".equalsIgnoreCase(method)) {
+                    return null;
+                }
+                Uri uri = request.getUrl();
+                String scheme = uri.getScheme();
+                if (!"http".equals(scheme) && !"https".equals(scheme)) {
+                    return null;   // 只拦 http(s)，file/data/content 等放行
+                }
+                // Solarpanel 自己的面板保留 viewport meta
+                String server = Prefs.getServer(MainActivity.this);
+                if (!TextUtils.isEmpty(server)) {
+                    try {
+                        String serverHost = Uri.parse(server).getHost();
+                        String pageHost = uri.getHost();
+                        if (serverHost != null && serverHost.equalsIgnoreCase(pageHost)) {
+                            return null;
+                        }
+                    } catch (Exception ignored) {}
+                }
+                try {
+                    return fetchAndStripViewport(request);
+                } catch (Exception e) {
+                    return null;   // 拦截失败就让 WebView 自己加载
+                }
+            }
+
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 mainFrameFailed = false;
+                // 每次新页面加载时重置 WebView 原生缩放状态。
+                // setInitialScale(0) 让 WebView 配合 setLoadWithOverviewMode 自动计算
+                // "整页塞进屏幕"的缩放比例，对桌面端网页（如 fnOS）效果完美——
+                // 左侧导航栏 + 中间内容 + 右侧面板的横向布局完整保留，只是整体缩小。
+                // 设成 100 会让 980px 的桌面页面溢出手机屏幕只能看到左半边。
+                // 用户捏合缩放后这个状态会"传染"到下一个页面，每次 loadUrl 必须重置。
+                view.setInitialScale(0);
                 // 新页面开始加载时先把顶栏放出来，进度条与关闭按钮才看得见
                 applyTopBarState(false, true);
             }
@@ -332,6 +475,8 @@ public class MainActivity extends AppCompatActivity {
                 if (!mainFrameFailed) {
                     hideErrorPanel();
                 }
+                // viewport meta 已在 shouldInterceptRequest 网络层被提前删除，
+                // 这里不需要再通过 JS 事后删除（时机太晚）
                 injectPanelCssFix();
                 injectScrollHook();
                 updateCloseButton();
@@ -341,6 +486,7 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
                 // SPA 路由切换（pushState）不会触发 onPageFinished，这里补一次
+                // （viewport meta 在第一次 load 时就被删了，后续 SPA 切换不会重新插入）
                 injectPanelCssFix();
                 injectScrollHook();
                 updateCloseButton();
@@ -542,7 +688,7 @@ public class MainActivity extends AppCompatActivity {
             topBarSettled = true;
             topBarHidden = hide;
             topBar.setTranslationY(barTarget);
-            swipeRefresh.setTranslationY(contentTarget);
+            webView.setTranslationY(contentTarget);
             return;
         }
         if (topBarHidden == hide) {
@@ -552,16 +698,16 @@ public class MainActivity extends AppCompatActivity {
 
         if (!animate) {
             topBar.setTranslationY(barTarget);
-            swipeRefresh.setTranslationY(contentTarget);
+            webView.setTranslationY(contentTarget);
             return;
         }
         topBar.animate().cancel();
-        swipeRefresh.animate().cancel();
+        webView.animate().cancel();
         topBar.animate()
                 .translationY(barTarget)
                 .setDuration(TOP_BAR_ANIM_MS)
                 .start();
-        swipeRefresh.animate()
+        webView.animate()
                 .translationY(contentTarget)
                 .setDuration(TOP_BAR_ANIM_MS)
                 .start();
@@ -569,6 +715,104 @@ public class MainActivity extends AppCompatActivity {
 
     private void injectScrollHook() {
         webView.evaluateJavascript(SCROLL_HOOK_JS, null);
+    }
+
+    /**
+     * shouldInterceptRequest 辅助方法：自己发起 HTTP 请求拿到 HTML，
+     * 正则删除所有 <meta name="viewport" ...> 标签，返回改好的响应。
+     *
+     * 这样渲染引擎从第一帧开始就看不到 viewport meta，
+     * 会用默认 ~980px 桌面宽度渲染，实现 Chrome 「桌面版网站」模式。
+     */
+    private WebResourceResponse fetchAndStripViewport(WebResourceRequest request) throws IOException {
+        URL url = new URL(request.getUrl().toString());
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        try {
+            conn.setRequestMethod("GET");
+            conn.setInstanceFollowRedirects(true);
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(15000);
+            conn.setRequestProperty("User-Agent", userAgent);
+            conn.setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+            // 带上 Cookie（包括 Solarpanel 面板的登录态，很多反代会校验）
+            String cookie = CookieManager.getInstance().getCookie(url.toString());
+            if (!TextUtils.isEmpty(cookie)) {
+                conn.setRequestProperty("Cookie", cookie);
+            }
+            // 复制其他请求头
+            for (Map.Entry<String, String> h : request.getRequestHeaders().entrySet()) {
+                String k = h.getKey();
+                if (!"User-Agent".equalsIgnoreCase(k) && !"Cookie".equalsIgnoreCase(k)
+                        && !"Host".equalsIgnoreCase(k) && !"Connection".equalsIgnoreCase(k)) {
+                    conn.setRequestProperty(k, h.getValue());
+                }
+            }
+
+            int code = conn.getResponseCode();
+            InputStream in = (code >= 200 && code < 400) ? conn.getInputStream() : conn.getErrorStream();
+            if (in == null) {
+                in = conn.getInputStream();   // 兜底
+            }
+
+            // 手动读响应体（readAllBytes 要 API 33，minSdk 24 不支持）
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            byte[] buffer = new byte[8192];
+            int len;
+            while ((len = in.read(buffer)) != -1) {
+                baos.write(buffer, 0, len);
+            }
+            in.close();
+            byte[] raw = baos.toByteArray();
+            String html = new String(raw, StandardCharsets.UTF_8);
+
+            // 正则删除所有 <meta name="viewport" ...> 标签（多行 / 大小写不敏感 / 自闭合都覆盖）
+            Pattern vpPattern = Pattern.compile(
+                    "<meta\\s+[^>]*name\\s*=\\s*[\"']viewport[\"'][^>]*/?>",
+                    Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+            Matcher m = vpPattern.matcher(html);
+            if (m.find()) {
+                html = m.replaceAll("");
+            } else {
+                // 有些页面把 name 放后面：<meta content="..." name="viewport">
+                vpPattern = Pattern.compile(
+                        "<meta\\s+[^>]*[\"']viewport[\"'][^>]*name\\s*=\\s*[\"'][^\"']+[\"'][^>]*/?>",
+                        Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+                m = vpPattern.matcher(html);
+                if (m.find()) {
+                    html = m.replaceAll("");
+                }
+            }
+
+            // 拿 Content-Type 确定 MIME type
+            String contentType = conn.getContentType();
+            String mimeType = "text/html";
+            String encoding = "utf-8";
+            if (!TextUtils.isEmpty(contentType)) {
+                int semi = contentType.indexOf(';');
+                if (semi > 0) {
+                    mimeType = contentType.substring(0, semi).trim();
+                    int eq = contentType.indexOf("charset=", semi + 1);
+                    if (eq >= 0) {
+                        encoding = contentType.substring(eq + 8).trim();
+                    }
+                } else {
+                    mimeType = contentType.trim();
+                }
+            }
+
+            // 复制响应头（主要是 Content-Type）
+            Map<String, String> respHeaders = new LinkedHashMap<>();
+            for (Map.Entry<String, List<String>> e : conn.getHeaderFields().entrySet()) {
+                if (e.getKey() != null && e.getValue() != null && !e.getValue().isEmpty()) {
+                    respHeaders.put(e.getKey(), e.getValue().get(0));
+                }
+            }
+
+            ByteArrayInputStream responseBody = new ByteArrayInputStream(html.getBytes(StandardCharsets.UTF_8));
+            return new WebResourceResponse(mimeType, encoding, code, conn.getResponseMessage(), respHeaders, responseBody);
+        } finally {
+            conn.disconnect();
+        }
     }
 
     /** 修正面板窄屏下分组标题被压成竖排的问题，详见 PANEL_CSS_FIX_JS。 */
@@ -601,7 +845,7 @@ public class MainActivity extends AppCompatActivity {
         webView.loadUrl(home);
     }
 
-    /** 暴露给网页的最小接口，只用来上报滚动方向。 */
+    /** 暴露给网页的最小接口，用来上报滚动方向与异步清理完成事件。 */
     private final class ScrollBridge {
 
         @JavascriptInterface
@@ -617,6 +861,20 @@ public class MainActivity extends AppCompatActivity {
                 runOnUiThread(() -> applyTopBarState(true, true));
             }
         }
+
+        @JavascriptInterface
+        public void onSwCleanupDone() {
+            // JS 里的 Promise.all(SW 注销 + Cache 清理) 都完成后才会走到这里。
+            // 同样在 JavaBridge 线程上执行，切回主线程跑后续清理逻辑。
+            runOnUiThread(() -> {
+                swCleanupTimeoutHandler.removeCallbacksAndMessages(null);
+                Runnable cont = swCleanupContinuation;
+                swCleanupContinuation = null;
+                if (cont != null) {
+                    cont.run();
+                }
+            });
+        }
     }
 
     // ------------------------------------------------------------------
@@ -629,6 +887,14 @@ public class MainActivity extends AppCompatActivity {
      */
     private boolean handleUri(Uri uri) {
         if (uri == null) {
+            return true;
+        }
+        // 自托管场景下，面板返回的卡片链接可能写成 localhost / 127.0.0.1，
+        // 手机 WebView 连自己的 localhost 当然连不上，需要把 host 重写成用户配置的服务器地址。
+        Uri rewritten = Urls.rewriteLocalHost(uri, Prefs.getServer(this));
+        if (rewritten != null) {
+            // 让 WebView 加载重写后的地址，不再 override
+            webView.loadUrl(rewritten.toString());
             return true;
         }
         String scheme = uri.getScheme();
@@ -751,10 +1017,41 @@ public class MainActivity extends AppCompatActivity {
                                  String userAgentHeader,
                                  String contentDisposition,
                                  String mimeType) {
+        // Android 13+ (API 33) 需要 POST_NOTIFICATIONS 权限才能显示下载完成通知；
+        // 没权限也能下载，但完成后不会出通知，提前请求一下用户体验更好。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            int state = ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS);
+            if (state != PackageManager.PERMISSION_GRANTED) {
+                if (pendingDownload != null) {
+                    // 已经有一个权限请求在走了，新的下载请求丢弃即可
+                    return;
+                }
+                pendingDownload = () -> doEnqueueDownload(url, userAgentHeader, contentDisposition, mimeType);
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS);
+                return;
+            }
+        }
+        doEnqueueDownload(url, userAgentHeader, contentDisposition, mimeType);
+    }
+
+    /** 真正执行 DownloadManager.enqueue；被 enqueueDownload 在权限通过后调用。 */
+    private void doEnqueueDownload(String url,
+                                   String userAgentHeader,
+                                   String contentDisposition,
+                                   String mimeType) {
         try {
+            // 下载链接里的 localhost / 127.0.0.1 也要重写，和页面导航同理
+            Uri downloadUri = Uri.parse(url);
+            String serverUrl = Prefs.getServer(this);
+            Uri rewritten = Urls.rewriteLocalHost(downloadUri, serverUrl);
+            if (rewritten != null) {
+                downloadUri = rewritten;
+                url = downloadUri.toString();
+            }
+
             String fileName = URLUtil.guessFileName(url, contentDisposition, mimeType);
 
-            DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url));
+            DownloadManager.Request request = new DownloadManager.Request(downloadUri);
             request.setMimeType(mimeType);
             request.setTitle(fileName);
             request.setDescription(url);
@@ -763,10 +1060,29 @@ public class MainActivity extends AppCompatActivity {
             request.setAllowedOverMetered(true);
             request.setAllowedOverRoaming(true);
 
-            // 备份导出等接口需要登录态，必须带上 Cookie
-            String cookie = CookieManager.getInstance().getCookie(url);
-            if (!TextUtils.isEmpty(cookie)) {
-                request.addRequestHeader("Cookie", cookie);
+            // 备份导出等接口需要登录态，必须带上 Cookie。
+            // DownloadManager 不会共享 WebView 的 CookieJar，所以手动注入；
+            // 同时，面板在反代/跨域下载场景下，下载链接的域名可能和面板本身不同
+            // （比如面板 IP:8080，下载重定向到另一个域名），此时 getCookie(url) 只会拿到
+            // 下载域名的 Cookie，丢失面板的登录态，所以也要把面板域名的 Cookie 一并带上。
+            CookieManager cm = CookieManager.getInstance();
+            StringBuilder cookieHeader = new StringBuilder();
+            String downloadCookie = cm.getCookie(url);
+            if (!TextUtils.isEmpty(downloadCookie)) {
+                cookieHeader.append(downloadCookie);
+            }
+            if (!TextUtils.isEmpty(serverUrl)) {
+                String serverCookie = cm.getCookie(serverUrl);
+                if (!TextUtils.isEmpty(serverCookie)
+                        && !TextUtils.equals(serverCookie, downloadCookie)) {
+                    if (cookieHeader.length() > 0) {
+                        cookieHeader.append("; ");
+                    }
+                    cookieHeader.append(serverCookie);
+                }
+            }
+            if (cookieHeader.length() > 0) {
+                request.addRequestHeader("Cookie", cookieHeader.toString());
             }
             if (!TextUtils.isEmpty(userAgentHeader)) {
                 request.addRequestHeader("User-Agent", userAgentHeader);
@@ -806,24 +1122,33 @@ public class MainActivity extends AppCompatActivity {
 
     private void clearWebData() {
         // 面板 v2.1.00 起自带 PWA 离线缓存（Service Worker + Cache Storage），
-        // 不属于下面清理的 Cookie / HTTP 缓存 / DOM 存储任何一种，需要单独清
+        // 不属于 Cookie / HTTP 缓存 / DOM 存储任何一种，需要单独清。
+        // SW 注销和 Cache 删除都是 JS 异步 API，所以先注入脚本，
+        // 等 Promise.all 全部 resolve 后再执行后面的 Cookie/Cache 清理。
+        // 同时加 3 秒超时兜底：万一 JS 因为某种原因（被禁用、页面崩了、上下文丢失）
+        // 没触发 onSwCleanupDone，也不会让用户卡在"清除"状态。
+        swCleanupContinuation = () -> {
+            CookieManager cookieManager = CookieManager.getInstance();
+            cookieManager.removeAllCookies(null);
+            cookieManager.flush();
+
+            webView.clearCache(true);
+            webView.clearHistory();
+            webView.clearFormData();
+
+            WebStorage.getInstance().deleteAllData();
+
+            toast(R.string.toast_cleared);
+            String server = Prefs.getServer(this);
+            if (!TextUtils.isEmpty(server)) {
+                webView.loadUrl(server);
+            }
+        };
         clearPanelServiceWorker();
 
-        CookieManager cookieManager = CookieManager.getInstance();
-        cookieManager.removeAllCookies(null);
-        cookieManager.flush();
-
-        webView.clearCache(true);
-        webView.clearHistory();
-        webView.clearFormData();
-
-        WebStorage.getInstance().deleteAllData();
-
-        toast(R.string.toast_cleared);
-        String server = Prefs.getServer(this);
-        if (!TextUtils.isEmpty(server)) {
-            webView.loadUrl(server);
-        }
+        // 3 秒超时：到期后若 onSwCleanupDone 还没被回调，强制执行后续清理。
+        // swCleanupTimeoutHandler 在 onDestroy 里会被 removeCallbacks，防止泄漏。
+        swCleanupTimeoutHandler.postDelayed(swCleanupTimeoutRunnable, 3000L);
     }
 
     /** 注销面板注册的 Service Worker 并清空其离线缓存，详见 PANEL_SW_CLEANUP_JS。 */
@@ -922,9 +1247,16 @@ public class MainActivity extends AppCompatActivity {
             filePathCallback.onReceiveValue(null);
             filePathCallback = null;
         }
+        // 移除 SW 清理的超时处理器，防止 Activity 被 MessageQueue 持引用延迟 GC
+        swCleanupTimeoutHandler.removeCallbacksAndMessages(null);
+        swCleanupContinuation = null;
+        pendingDownload = null;
         if (webView != null) {
+            webView.stopLoading();
+            webView.removeAllViews();
+            webView.removeJavascriptInterface("SolarpanelHost");
             webView.setWebChromeClient(null);
-            webView.setWebViewClient(new WebViewClient());
+            webView.setWebViewClient(null);
             webView.destroy();
             webView = null;
         }

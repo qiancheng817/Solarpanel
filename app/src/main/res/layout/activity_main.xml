@@ -7,21 +7,14 @@
     android:background="@color/app_background">
 
     <!--
-        网页容器。它整体会被顶栏高度往下推一段（translationY），
+        网页容器。整体会被顶栏高度往下推一段（translationY），
         所以网页顶部不会被顶栏挡住；顶栏收起时这段位移归零，
         可视区域立刻变大，而且不需要让 WebView 重新布局（不会造成网页回流抖动）。
     -->
-    <FrameLayout
-        android:id="@+id/swipeRefresh"
+    <WebView
+        android:id="@+id/webView"
         android:layout_width="match_parent"
-        android:layout_height="match_parent">
-
-        <WebView
-            android:id="@+id/webView"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent" />
-
-    </FrameLayout>
+        android:layout_height="match_parent" />
 
     <!--
         顶栏：覆盖在网页之上，下滑自动收起、上滑自动出现。
