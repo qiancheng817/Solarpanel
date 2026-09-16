@@ -164,16 +164,48 @@ public class MainActivity extends AppCompatActivity {
                     + "})();";
 
     /**
-     * 切换上游面板的卡片地址模式（内网 / 外网）。
+     * 给上游面板的 renderBase() 打补丁，让它尊重 App 设置的网络模式。
      *
-     * 上游 index.js 在全局作用域定义 const state，state.lanMode 为 true 时
-     * 卡片用 lan_url（内网地址），否则用 url（外网地址）。
-     * renderGroups() 会按当前 state 重新渲染所有卡片。
-     * 这里直接改 state.lanMode 并触发重渲染，无需重载页面或调后端 API。
+     * 上游 renderBase() 每次调用都会无条件执行
+     *   state.lanMode = s.default_lan_mode === 'lan'
+     * 把 App 通过 evaluateJavascript 注入的 state.lanMode 覆盖回去，
+     * 导致 App 切了内网模式，下次打开面板又被重置成外网。
+     *
+     * 这个 hook 把 renderBase 包一层：先让它跑原逻辑（完成主题、时钟等渲染），
+     * 再把 state.lanMode 改回 App 设定的值并触发 renderGroups() 重渲染卡片。
+     * 同时把包装后的 renderBase 存在 window 上，面板后续任何地方调 renderBase
+     * 都会自动尊重 App 的网络模式。
+     *
+     * 幂等：window.__renderBaseHooked 标记保证只包装一次，后续页面重载会重新注入。
      */
+    private static final String NETWORK_MODE_HOOK_JS =
+            "(function(){"
+                    + "if(window.__renderBaseHooked){return;}"
+                    + "if(typeof renderBase!=='function'){return;}"
+                    + "var orig=renderBase;"
+                    + "renderBase=function(){"
+                    + "orig.apply(this,arguments);"
+                    + "if(window.__appLanMode!==undefined"
+                    + "&&typeof state!=='undefined'&&state!==null){"
+                    + "state.lanMode=window.__appLanMode;"
+                    + "if(typeof renderGroups==='function'){renderGroups();}"
+                    + "}"
+                    + "};"
+                    + "window.__renderBaseHooked=true;"
+                    + "})();"
+                    + "try{"
+                    + "if(typeof state!=='undefined'&&state!==null"
+                    + "&&window.__appLanMode!==undefined){"
+                    + "state.lanMode=window.__appLanMode;"
+                    + "if(typeof renderGroups==='function'){renderGroups();}"
+                    + "}"
+                    + "}catch(e){}";
+
+    /** 切换按钮点了之后，直接改 window.__appLanMode + state.lanMode 并重渲染。 */
     private static final String NETWORK_TOGGLE_JS_TEMPLATE =
             "try{"
                     + "if(typeof state!=='undefined'&&state!==null){"
+                    + "window.__appLanMode=%s;"
                     + "state.lanMode=%s;"
                     + "if(typeof renderGroups==='function'){renderGroups();}"
                     + "}"
@@ -916,10 +948,18 @@ public class MainActivity extends AppCompatActivity {
                 Toast.LENGTH_SHORT).show();
     }
 
-    /** 把当前网络模式（lan/wan）应用到面板页面：注入 JS 设置 state.lanMode 并触发 renderGroups()。 */
+    /**
+     * 把当前网络模式（lan/wan）应用到面板页面。
+     * 先给 renderBase 打 hook（幂等），再设 window.__appLanMode + state.lanMode + 重渲染。
+     * renderBase hook 保证后续任何 renderBase 调用都尊重 App 的选择，
+     * 不会再被上游的 default_lan_mode 覆盖回去。
+     */
     private void applyNetworkModeToPage() {
+        // 先注入 hook（如果页面还没 hook 过）
+        webView.evaluateJavascript(NETWORK_MODE_HOOK_JS, null);
+        // 再设 App 标记 + 直接生效
         boolean lan = "lan".equals(Prefs.getNetworkMode(this));
-        String js = String.format(NETWORK_TOGGLE_JS_TEMPLATE, lan ? "true" : "false");
+        String js = String.format(NETWORK_TOGGLE_JS_TEMPLATE, lan ? "true" : "false", lan ? "true" : "false");
         webView.evaluateJavascript(js, null);
     }
 
