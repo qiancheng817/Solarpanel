@@ -102,6 +102,29 @@ public class MainActivity extends AppCompatActivity {
                     + "})();";
 
     /**
+     * 面板移动端样式的兜底修正（幂等，重复注入只生效一次）。
+     *
+     * 上游面板在窄屏（≤640px）下把分组头部的操作区设成 width:100%，但 .group-head
+     * 自身没有开 flex-wrap，于是分组标题被挤到只剩一个字的宽度——「飞牛」这类分组名
+     * 会一个字一行地竖着排下来。该问题只在管理员 / 编辑登录后出现（排序按钮只有他们
+     * 有），所以容易漏掉。这里补上换行：标题回到一行，操作区落到下一行。
+     * 上游若已修复，这段样式与其一致，不会冲突；不想要的话删掉本常量与 injectPanelCssFix()
+     * 的调用即可。
+     */
+    private static final String PANEL_CSS_FIX_JS =
+            "(function(){"
+                    + "if(document.getElementById('solarpanel-css-fix')){return;}"
+                    + "var s=document.createElement('style');"
+                    + "s.id='solarpanel-css-fix';"
+                    + "s.textContent='@media (max-width:640px){"
+                    + ".group-head{flex-wrap:wrap;}"
+                    + ".group-head h2{flex:0 0 auto;}"
+                    + ".group-head .desc{min-width:0;}"
+                    + "}';"
+                    + "(document.head||document.documentElement).appendChild(s);"
+                    + "})();";
+
+    /**
      * 自托管服务常使用自签名证书，严格校验会导致整站无法访问。
      * 若你使用受信任的正式证书，可把这里改为 false 以恢复严格校验。
      */
@@ -287,6 +310,7 @@ public class MainActivity extends AppCompatActivity {
                 if (!mainFrameFailed) {
                     hideErrorPanel();
                 }
+                injectPanelCssFix();
                 injectScrollHook();
                 updateCloseButton();
             }
@@ -295,6 +319,7 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
                 // SPA 路由切换（pushState）不会触发 onPageFinished，这里补一次
+                injectPanelCssFix();
                 injectScrollHook();
                 updateCloseButton();
             }
@@ -522,6 +547,11 @@ public class MainActivity extends AppCompatActivity {
 
     private void injectScrollHook() {
         webView.evaluateJavascript(SCROLL_HOOK_JS, null);
+    }
+
+    /** 修正面板窄屏下分组标题被压成竖排的问题，详见 PANEL_CSS_FIX_JS。 */
+    private void injectPanelCssFix() {
+        webView.evaluateJavascript(PANEL_CSS_FIX_JS, null);
     }
 
     /** 只有在"当前不在面板首页"时，顶栏才显示关闭按钮。 */

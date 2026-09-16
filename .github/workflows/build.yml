@@ -128,7 +128,7 @@ jobs:
           tag_name: v${{ steps.apk.outputs.version }}
           name: Solarpanel v${{ steps.apk.outputs.version }}
           body: |
-            自托管 Solarpanel 导航面板的安卓客户端。
+            安卓客户端导航面板，来自 https://github.com/Ozero-top/Solar-Panel
 
             - 应用名：Solarpanel
             - versionName：${{ steps.apk.outputs.version }}
