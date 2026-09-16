@@ -165,6 +165,36 @@ settings.setJavaScriptCanOpenWindowsAutomatically(true);
 
 ## 更新记录
 
+### v1.2.12
+
+- **修复黑屏**：`fetchAndStripViewport` 拦截外部页面主文档时，复制响应头漏掉了
+  `Content-Encoding` / `Content-Length` 过滤——`HttpURLConnection` 已自动解压 gzip body，
+  但响应头仍带 `Content-Encoding: gzip`，WebView 收到后尝试二次 gunzip 失败 → 页面黑屏
+  （如 `https://eb302.qc817.top:5786`）。改为跳过这两个头。
+- **屏幕比例切换**：菜单新增「切换为手机模式 / 切换为电脑模式」。
+  手机模式用移动 UA + 保留 viewport meta（按 device-width 渲染）；
+  电脑模式用桌面 UA + 网络层删 viewport（980px 桌面宽）。
+- **内网/外网卡片地址切换**：菜单新增「切换为内网模式 / 切换为外网模式」。
+  注入 JS 直接改上游面板全局 `state.lanMode` 并触发 `renderGroups()` 重渲染，
+  卡片即时切换用内网地址（`lan_url`）或外网地址（`url`），无需重载页面、无需改面板后端。
+  设置持久化，退出重进保持。
+
+### v1.2.11
+
+- **修复外部站点 POST 登录失败**：`shouldInterceptRequest` 拦截所有主文档请求后
+  `fetchAndStripViewport` 强制 `setRequestMethod("GET")`，把表单登录的 POST 转成 GET，
+  body 中的用户名密码被丢弃，服务器收不到凭据返回原登录页——表现为
+  "点登录后页面刷新一遍但登不上"。改为只拦截 GET，POST 等带 body 的请求放行给 WebView。
+- **移除下拉刷新**：删除 `SwipeRefreshLayout`（布局 / Java / 依赖三处），
+  顶栏自动收放的 `translationY` 改为直接作用于 `WebView`。
+- 同步本地最新源码到仓库（`strings.xml`、`Urls.java`、`colors.xml`、
+  `AndroidManifest.xml`、`README.md`、`build.yml`）。
+
+### v1.2.10
+
+- 在 v1.2.09 网络层拦截删除 viewport 方案基础上的稳定版本。
+  该版本对应仓库初始同步的源码状态（`versionCode 15`）。
+
 ### v1.2.09
 
 - **彻底修复桌面端页面堆砌问题**：v1.2.07 改了 UA、v1.2.08 加了 JS 事后删除 viewport meta，
