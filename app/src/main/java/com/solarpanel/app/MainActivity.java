@@ -8,19 +8,14 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
-import android.net.ConnectivityManager;
-import android.net.Network;
-import android.net.NetworkCapabilities;
-import android.net.NetworkRequest;
 import android.net.Uri;
 import android.net.http.SslError;
-import android.net.wifi.WifiInfo;
-import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.text.InputType;
 import android.text.TextUtils;
 import android.util.TypedValue;
@@ -34,6 +29,7 @@ import android.view.inputmethod.InputMethodManager;
 import android.webkit.CookieManager;
 import android.webkit.HttpAuthHandler;
 import android.webkit.JavascriptInterface;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.SslErrorHandler;
 import android.webkit.URLUtil;
 import android.webkit.ValueCallback;
@@ -46,6 +42,7 @@ import android.webkit.WebStorage;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.Toast;
@@ -54,6 +51,7 @@ import androidx.activity.OnBackPressedCallback;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.Nullable;
+import androidx.annotation.RequiresApi;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
@@ -75,6 +73,9 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.zip.GZIPInputStream;
+import java.util.zip.Inflater;
+import java.util.zip.InflaterInputStream;
 
 /**
  * Solarpanel 安卓客户端。
@@ -170,42 +171,6 @@ public class MainActivity extends AppCompatActivity {
                     + "})();";
 
     /**
-     * 把 App 设定的网络模式应用到上游面板。
-     *
-     * 上游 boot() 里 API.get() 是异步的，await 返回后会调 renderBase()，
-     * renderBase() L219 无条件执行 state.lanMode = s.default_lan_mode === 'lan'，
-     * 会把 App 注入的 state.lanMode 覆盖回后端默认值。
-     *
-     * 不碰 renderBase（之前包装它导致访客密码锁屏页被干扰），
-     * 只设 window.__appLanMode 标记，然后用 setInterval 轮询：
-     * 每 100ms 检查 state.groups 是否有数据，一旦有就覆盖 state.lanMode
-     * 并重渲染卡片，然后 clearInterval 停掉。
-     * 最多轮询 200 次（20 秒）兜底自动清除，防止泄漏。
-     *
-     * 访客密码锁屏页：boot() 提前 return → groups 永远是空数组 →
-     * 轮询 20 秒后自动清除，全程不执行任何 DOM 操作或 state 覆盖。
-     *
-     * 正常面板首页：API.get 返回 + renderBase + renderGroups 都跑完后，
-     * groups 有数据 → 下一次轮询就覆盖 lanMode。
-     * 不管网络多慢，覆盖一定能在 boot() 完成后的 100ms 内发生。
-     */
-    private static final String NETWORK_MODE_HOOK_JS =
-            "(function(){try{"
-                    + "window.__appLanMode=%s;"
-                    + "var tries=0;"
-                    + "var timer=setInterval(function(){"
-                    + "tries++;"
-                    + "if(typeof state!=='undefined'&&state!==null"
-                    + "&&state.groups&&state.groups.length>0){"
-                    + "clearInterval(timer);"
-                    + "state.lanMode=window.__appLanMode;"
-                    + "if(typeof renderGroups==='function'){renderGroups();}"
-                    + "}"
-                    + "if(tries>=200){clearInterval(timer);}"
-                    + "},100);"
-                    + "}catch(e){})()";
-
-    /**
      * 面板 v2.1.00 起自带 PWA（Service Worker + Cache Storage 离线缓存）。
      *
      * 「清除缓存与登录状态」能清掉 Cookie、HTTP 缓存与 DOM 存储，但这三类都
@@ -287,10 +252,12 @@ public class MainActivity extends AppCompatActivity {
     private volatile boolean jsScrollHookAlive;
     private float touchAnchorY;
 
-    /** 自动切换内外网所需的网络服务与回调。 */
-    private ConnectivityManager connectivityManager;
-    private WifiManager wifiManager;
-    private ConnectivityManager.NetworkCallback networkCallback;
+    /** 渲染进程崩溃（onRenderProcessGone）自动恢复计数：同一页面短时间连续崩溃超过上限就停止自动重载。 */
+    private String lastRendererCrashedUrl;
+    private int rendererCrashCount;
+    private long firstRendererCrashAt;
+    private static final int MAX_RENDERER_AUTO_RECOVERIES = 2;
+    private static final long RENDERER_CRASH_WINDOW_MS = 30_000L;
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -549,7 +516,6 @@ public class MainActivity extends AppCompatActivity {
                 // 这里不需要再通过 JS 事后删除（时机太晚）
                 injectPanelCssFix();
                 injectScrollHook();
-                applyNetworkModeToPage();
                 updateCloseButton();
             }
 
@@ -560,7 +526,6 @@ public class MainActivity extends AppCompatActivity {
                 // （viewport meta 在第一次 load 时就被删了，后续 SPA 切换不会重新插入）
                 injectPanelCssFix();
                 injectScrollHook();
-                applyNetworkModeToPage();
                 updateCloseButton();
             }
 
@@ -597,6 +562,17 @@ public class MainActivity extends AppCompatActivity {
                 // 兼容 Nginx 反代上常见的 HTTP Basic 认证
                 showHttpAuthDialog(handler, host, realm);
             }
+
+            @RequiresApi(Build.VERSION_CODES.O)
+            @Override
+            public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                // 系统 WebView 渲染进程被杀/崩溃时触发（界面上就是
+                // 「页面遇到意外问题，可以点击"重新加载"恢复」的粉色卡片）。
+                // 崩溃后的 WebView 实例不可再用，必须销毁重建并恢复页面；
+                // 全部处理由我们自己完成，返回 true 阻止应用进程跟着崩溃。
+                handleRenderProcessGone(view);
+                return true;
+            }
         });
     }
 
@@ -620,14 +596,6 @@ public class MainActivity extends AppCompatActivity {
             }
             if (id == R.id.action_toggle_display) {
                 toggleDisplayMode();
-                return true;
-            }
-            if (id == R.id.action_auto_network) {
-                toggleAutoNetworkMode();
-                return true;
-            }
-            if (id == R.id.action_config_ssids) {
-                showSsidConfigDialog();
                 return true;
             }
             if (id == R.id.action_change_server) {
@@ -702,6 +670,99 @@ public class MainActivity extends AppCompatActivity {
         };
         findViewById(R.id.errorRetryButton).setOnClickListener(retry);
         findViewById(R.id.errorChangeButton).setOnClickListener(v -> showSetupPanel(Prefs.getServer(this)));
+    }
+
+    // ------------------------------------------------------------------
+    // 渲染进程崩溃恢复
+    // ------------------------------------------------------------------
+
+    /**
+     * WebView 渲染进程意外终止时的兜底恢复（界面上就是系统弹出的
+     * 「页面遇到意外问题，可以点击"重新加载"恢复」卡片）。
+     *
+     * 已崩溃的 WebView 实例不可再用，必须从视图树移除并 destroy，
+     * 再新建实例自动恢复崩溃前的 URL；同一页面在短时间窗口内连续崩溃
+     * 超过上限则不再自动重载，避免无限刷新循环，改为显示错误页让用户手动决定。
+     */
+    @RequiresApi(Build.VERSION_CODES.O)
+    private void handleRenderProcessGone(WebView dead) {
+        String crashedUrl = dead.getUrl();
+        long now = SystemClock.elapsedRealtime();
+        if (TextUtils.equals(crashedUrl, lastRendererCrashedUrl)
+                && now - firstRendererCrashAt < RENDERER_CRASH_WINDOW_MS) {
+            rendererCrashCount++;
+        } else {
+            lastRendererCrashedUrl = crashedUrl;
+            rendererCrashCount = 1;
+            firstRendererCrashAt = now;
+        }
+
+        // 渲染进程死了，进行中文件选择回调也不可能再回来，清掉避免泄漏
+        filePathCallback = null;
+        recreateWebView(dead);
+
+        if (rendererCrashCount > MAX_RENDERER_AUTO_RECOVERIES) {
+            // 短时间反复崩溃：新实例停在空白页并展示错误面板，由用户手动选择
+            mainFrameFailed = true;
+            showErrorPanel();
+            return;
+        }
+
+        mainFrameFailed = false;
+        hideErrorPanel();
+        if (!TextUtils.isEmpty(crashedUrl)) {
+            webView.loadUrl(crashedUrl);
+        } else {
+            String server = Prefs.getServer(this);
+            if (!TextUtils.isEmpty(server)) {
+                webView.loadUrl(server);
+            } else {
+                showSetupPanel("");
+            }
+        }
+    }
+
+    /**
+     * 销毁已崩溃的 WebView 并在原位置创建全新实例，重新套用所有
+     * 与 WebView 实例绑定的配置；顶栏 / 配置页 / 错误页等共享视图、
+     * 菜单监听与返回键回调不受影响、不重复注册。
+     */
+    private void recreateWebView(WebView dead) {
+        ViewGroup parent = (ViewGroup) dead.getParent();
+        int index = 0;
+        if (parent != null) {
+            int idx = parent.indexOfChild(dead);
+            if (idx >= 0) {
+                index = idx;
+            }
+            parent.removeView(dead);
+        }
+        try {
+            dead.destroy();
+        } catch (Exception ignored) {
+        }
+        webView = null;
+
+        if (parent == null) {
+            parent = findViewById(R.id.root);
+            index = 0;
+        }
+        WebView fresh = new WebView(this);
+        fresh.setId(R.id.webView);
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
+        parent.addView(fresh, index, lp);
+        webView = fresh;
+
+        // 按崩溃前的顶栏状态就位：顶栏展开时内容整体下推一个顶栏高度
+        fresh.setTranslationY((topBarHeight > 0 && !topBarHidden) ? topBarHeight : 0f);
+
+        configureWebView();
+        configureWebChromeClient();
+        configureWebViewClient();
+        configureDownloadListener();
+        configureToolbar();
+        configureScrollHiding();
     }
 
     // ------------------------------------------------------------------
@@ -809,6 +870,15 @@ public class MainActivity extends AppCompatActivity {
      *
      * 这样渲染引擎从第一帧开始就看不到 viewport meta，
      * 会用默认 ~980px 桌面宽度渲染，实现 Chrome 「桌面版网站」模式。
+     *
+     * 压缩处理（关键）：WebView 原生请求带的是 "Accept-Encoding: gzip, deflate, br"，
+     * Cloudflare 等 CDN 见到 br 会回 Brotli 压缩的主文档，而 HttpURLConnection
+     * 只会自动解 gzip、不认识 Brotli——把压缩流原样按 UTF-8 文本交给 WebView，
+     * 渲染引擎拿到的就是损坏文档，表现为页面打不开甚至渲染进程直接崩溃
+     * （如 https://www.jying.top 的「页面遇到意外问题」）。
+     * 因此这里显式只要 identity 原文，再按魔数兜底处理 gzip/deflate；
+     * 万一服务器仍返回 br/zstd 等无法解码的编码，就抛异常让外层返回 null，
+     * 交回 WebView 自带网络栈（原生支持 Brotli）正常加载，只放弃本次 viewport 剥离。
      */
     private WebResourceResponse fetchAndStripViewport(WebResourceRequest request) throws IOException {
         URL url = new URL(request.getUrl().toString());
@@ -820,16 +890,19 @@ public class MainActivity extends AppCompatActivity {
             conn.setReadTimeout(15000);
             conn.setRequestProperty("User-Agent", userAgent);
             conn.setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+            // 解压由本方法自己负责，只向服务器要未压缩原文，避免协商出 Brotli
+            conn.setRequestProperty("Accept-Encoding", "identity");
             // 带上 Cookie（包括 Solarpanel 面板的登录态，很多反代会校验）
             String cookie = CookieManager.getInstance().getCookie(url.toString());
             if (!TextUtils.isEmpty(cookie)) {
                 conn.setRequestProperty("Cookie", cookie);
             }
-            // 复制其他请求头
+            // 复制其他请求头；由本方法接管 / 禁止透传的头跳过
             for (Map.Entry<String, String> h : request.getRequestHeaders().entrySet()) {
                 String k = h.getKey();
                 if (!"User-Agent".equalsIgnoreCase(k) && !"Cookie".equalsIgnoreCase(k)
-                        && !"Host".equalsIgnoreCase(k) && !"Connection".equalsIgnoreCase(k)) {
+                        && !"Host".equalsIgnoreCase(k) && !"Connection".equalsIgnoreCase(k)
+                        && !"Accept-Encoding".equalsIgnoreCase(k)) {
                     conn.setRequestProperty(k, h.getValue());
                 }
             }
@@ -840,15 +913,8 @@ public class MainActivity extends AppCompatActivity {
                 in = conn.getInputStream();   // 兜底
             }
 
-            // 手动读响应体（readAllBytes 要 API 33，minSdk 24 不支持）
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            byte[] buffer = new byte[8192];
-            int len;
-            while ((len = in.read(buffer)) != -1) {
-                baos.write(buffer, 0, len);
-            }
-            in.close();
-            byte[] raw = baos.toByteArray();
+            // 读取响应体并在需要时手动解压（identity/gzip/deflate；br/zstd 直接放弃拦截）
+            byte[] raw = readDecodedBody(in, conn.getContentEncoding());
             String html = new String(raw, StandardCharsets.UTF_8);
 
             // 正则删除所有 <meta name="viewport" ...> 标签（多行 / 大小写不敏感 / 自闭合都覆盖）
@@ -886,10 +952,11 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
 
-            // 复制响应头（主要是 Content-Type），跳过会误导 WebView 的编码/长度头：
-            // body 已被 HttpURLConnection 自动 gunzip 并被我们以 UTF-8 重新编码，
-            // 原始 Content-Encoding / Content-Length 不再适用，
-            // 保留 gzip 头会让 WebView 误以为 body 仍是压缩流，二次解压失败 → 页面黑屏。
+            // 复制响应头（主要是 Content-Type），跳过会误导 WebView 的传输/编码/长度头：
+            // body 已经过我们手动解压并以 UTF-8 重新编码，原始 Content-Encoding、
+            // Content-Length、Transfer-Encoding 都不再适用于返回给 WebView 的新 body，
+            // 保留会让 WebView 按旧头二次处理（二次解压 / 长度不符 / 分块误读）→
+            // 页面黑屏或渲染失败。
             Map<String, String> respHeaders = new LinkedHashMap<>();
             for (Map.Entry<String, List<String>> e : conn.getHeaderFields().entrySet()) {
                 if (e.getKey() == null || e.getValue() == null || e.getValue().isEmpty()) {
@@ -897,7 +964,8 @@ public class MainActivity extends AppCompatActivity {
                 }
                 String hk = e.getKey();
                 if (hk.equalsIgnoreCase("Content-Encoding")
-                        || hk.equalsIgnoreCase("Content-Length")) {
+                        || hk.equalsIgnoreCase("Content-Length")
+                        || hk.equalsIgnoreCase("Transfer-Encoding")) {
                     continue;
                 }
                 respHeaders.put(hk, e.getValue().get(0));
@@ -908,6 +976,81 @@ public class MainActivity extends AppCompatActivity {
         } finally {
             conn.disconnect();
         }
+    }
+
+    /**
+     * 读取主文档响应体，并根据实际压缩情况解压为原始字节。
+     *
+     * - Content-Encoding 声明为 br / zstd 等本方法无法解码的编码时，直接抛 IOException：
+     *   外层 shouldInterceptRequest 捕获后返回 null，由 WebView 自己的网络栈加载
+     *   （Chromium 原生支持 Brotli），页面仍可正常打开，只是这次不剥离 viewport。
+     * - gzip / zlib(deflate) 优先按魔数判断——既兼容服务器不按声明出牌，
+     *   也兼容 HttpURLConnection 已透明 gunzip（此时体就是明文，不该再解一次）。
+     * - 声明 deflate 但没有 zlib 头时，按 raw deflate 兜底。
+     */
+    private byte[] readDecodedBody(InputStream in, String contentEncoding) throws IOException {
+        String enc = contentEncoding == null ? "" : contentEncoding.trim().toLowerCase(Locale.ROOT);
+        for (String token : enc.split(",")) {
+            String t = token.trim();
+            if ("br".equals(t) || "brotli".equals(t)
+                    || "zstd".equals(t) || "zst".equals(t)
+                    || "compress".equals(t) || "x-compress".equals(t)) {
+                throw new IOException("Unsupported Content-Encoding, fallback to native WebView load: " + enc);
+            }
+        }
+
+        byte[] raw = readAllBytes(in);
+
+        // gzip 魔数 1F 8B
+        if (raw.length >= 2 && (raw[0] & 0xFF) == 0x1F && (raw[1] & 0xFF) == 0x8B) {
+            GZIPInputStream gis = new GZIPInputStream(new ByteArrayInputStream(raw));
+            try {
+                return readAllBytes(gis);
+            } finally {
+                gis.close();
+            }
+        }
+        // zlib 头：CM 必须为 8（deflate），且 (CMF*256+FLG) 能被 31 整除
+        if (raw.length >= 2 && (raw[0] & 0x0F) == 0x08) {
+            int header = ((raw[0] & 0xFF) << 8) | (raw[1] & 0xFF);
+            if (header % 31 == 0) {
+                return inflateBody(raw, false);
+            }
+        }
+        if ("deflate".equals(enc)) {
+            // 少数服务器/代理发的是没有 zlib 包装的 raw deflate
+            return inflateBody(raw, true);
+        }
+        return raw;
+    }
+
+    /** zlib（raw=false）或 raw deflate（raw=true）解压。 */
+    private static byte[] inflateBody(byte[] data, boolean raw) throws IOException {
+        Inflater inflater = new Inflater(raw);
+        InflaterInputStream iis = new InflaterInputStream(new ByteArrayInputStream(data), inflater);
+        try {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            byte[] buffer = new byte[8192];
+            int n;
+            while ((n = iis.read(buffer)) != -1) {
+                baos.write(buffer, 0, n);
+            }
+            return baos.toByteArray();
+        } finally {
+            iis.close();
+            inflater.end();
+        }
+    }
+
+    /** 读尽输入流（readAllBytes 要 API 33，minSdk 24 不支持）。 */
+    private static byte[] readAllBytes(InputStream in) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        byte[] buffer = new byte[8192];
+        int n;
+        while ((n = in.read(buffer)) != -1) {
+            baos.write(buffer, 0, n);
+        }
+        return baos.toByteArray();
     }
 
     /** 修正面板窄屏下分组标题被压成竖排的问题，详见 PANEL_CSS_FIX_JS。 */
@@ -940,201 +1083,14 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * 把当前网络模式（lan/wan）应用到面板页面。
-     * 不碰 renderBase，只设 window.__appLanMode + setInterval 轮询等 boot() 跑完再覆盖 state.lanMode。
-     */
-    private void applyNetworkModeToPage() {
-        boolean lan = "lan".equals(Prefs.getNetworkMode(this));
-        String js = String.format(NETWORK_MODE_HOOK_JS, lan ? "true" : "false");
-        webView.evaluateJavascript(js, null);
-    }
-
-    // ------------------------------------------------------------------
-    // 自动切换内外网
-    // ------------------------------------------------------------------
-
-    /** 切换自动模式开/关。关闭后恢复用户手动选择的模式。 */
-    private void toggleAutoNetworkMode() {
-        boolean wasAuto = Prefs.isAutoNetwork(this);
-        Prefs.setAutoNetwork(this, !wasAuto);
-        if (!wasAuto) {
-            // 打开自动模式 → 立即检测一次并应用
-            detectNetworkAndApply(true);
-            Toast.makeText(this, R.string.toast_auto_network_on, Toast.LENGTH_SHORT).show();
-            registerNetworkCallback();
-        } else {
-            // 关闭自动模式 → 恢复用户之前手动选的模式
-            applyNetworkModeToPage();
-            Toast.makeText(this, R.string.toast_auto_network_off, Toast.LENGTH_SHORT).show();
-        }
-        updateToggleMenuTitles();
-    }
-
-    /** 弹出对话框让用户输入家庭 WiFi SSID 列表。 */
-    private void showSsidConfigDialog() {
-        EditText input = new EditText(this);
-        input.setHint(R.string.ssid_dialog_hint);
-        input.setText(Prefs.getHomeSsids(this));
-        input.setInputType(InputType.TYPE_CLASS_TEXT);
-        int pad = (int) (16 * getResources().getDisplayMetrics().density);
-        input.setPadding(pad, pad, pad, pad);
-
-        new AlertDialog.Builder(this)
-                .setTitle(R.string.ssid_dialog_title)
-                .setMessage(R.string.ssid_dialog_message)
-                .setView(input)
-                .setPositiveButton(R.string.dialog_ok, (dialog, which) -> {
-                    String ssids = input.getText().toString().trim();
-                    Prefs.setHomeSsids(this, ssids);
-                    // 保存后如果自动模式开着，立即重新检测
-                    if (Prefs.isAutoNetwork(this)) {
-                        detectNetworkAndApply(true);
-                    }
-                })
-                .setNegativeButton(R.string.dialog_cancel, null)
-                .show();
-    }
-
-    /** 注册网络变化监听。只有自动模式开着才需要监听。 */
-    private void registerNetworkCallback() {
-        if (!Prefs.isAutoNetwork(this)) return;
-        if (connectivityManager == null) {
-            connectivityManager = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
-        }
-        if (wifiManager == null) {
-            wifiManager = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
-        }
-        if (connectivityManager == null || networkCallback != null) return;
-
-        networkCallback = new ConnectivityManager.NetworkCallback() {
-            @Override
-            public void onAvailable(Network network) {
-                runOnUiThread(() -> detectNetworkAndApply(true));
-            }
-
-            @Override
-            public void onLost(Network network) {
-                runOnUiThread(() -> detectNetworkAndApply(true));
-            }
-
-            @Override
-            public void onCapabilitiesChanged(Network network, NetworkCapabilities networkCapabilities) {
-                runOnUiThread(() -> detectNetworkAndApply(true));
-            }
-        };
-
-        NetworkRequest request = new NetworkRequest.Builder()
-                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                .build();
-        try {
-            connectivityManager.registerNetworkCallback(request, networkCallback);
-        } catch (IllegalArgumentException ignored) {
-            // 某些 ROM 上可能抛异常，忽略即可
-        }
-    }
-
-    private void unregisterNetworkCallback() {
-        if (connectivityManager != null && networkCallback != null) {
-            try {
-                connectivityManager.unregisterNetworkCallback(networkCallback);
-            } catch (IllegalArgumentException ignored) {
-            }
-            networkCallback = null;
-        }
-    }
-
-    /**
-     * 检测当前网络是否是家庭 WiFi，然后自动切换内外网模式。
-     *
-     * 判断逻辑：
-     * - 自动模式没开 → 不做任何事
-     * - 当前是移动数据（蜂窝）→ 外网
-     * - 当前是 WiFi → 取 SSID 和 Prefs 里的家庭 SSID 列表比对
-     *   - 匹配 → 内网
-     *   - 不匹配 → 外网
-     *
-     * @param showToast 是否在模式切换时弹 Toast（自动检测触发时 false，用户手动触发时 true）
-     */
-    private void detectNetworkAndApply(boolean showToast) {
-        if (!Prefs.isAutoNetwork(this)) return;
-
-        boolean shouldBeLan = false;
-        ConnectivityManager cm = connectivityManager != null ? connectivityManager
-                : (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
-        if (cm != null) {
-            NetworkCapabilities caps = cm.getNetworkCapabilities(cm.getActiveNetwork());
-            if (caps != null) {
-                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
-                    // 移动数据 → 外网
-                    shouldBeLan = false;
-                } else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
-                    // WiFi → 检查 SSID
-                    shouldBeLan = isHomeWifi();
-                } else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) {
-                    // 有线（模拟以太网等）→ 大概率在家
-                    shouldBeLan = true;
-                }
-            }
-        }
-
-        String targetMode = shouldBeLan ? "lan" : "wan";
-        String currentMode = Prefs.getNetworkMode(this);
-        if (!targetMode.equals(currentMode)) {
-            Prefs.setNetworkMode(this, targetMode);
-            applyNetworkModeToPage();
-            if (showToast) {
-                Toast.makeText(this,
-                        shouldBeLan ? R.string.toast_auto_switched_lan : R.string.toast_auto_switched_wan,
-                        Toast.LENGTH_SHORT).show();
-            }
-            updateToggleMenuTitles();
-        }
-    }
-
-    /** 判断当前连接的 WiFi SSID 是否在家庭 SSID 列表里。 */
-    private boolean isHomeWifi() {
-        if (wifiManager == null) {
-            wifiManager = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
-        }
-        if (wifiManager == null) return false;
-
-        WifiInfo info = wifiManager.getConnectionInfo();
-        if (info == null) return false;
-
-        // Android 10+ 需要 ACCESS_FINE_LOCATION 才能拿到真实 SSID，
-        // 如果拿到 "<unknown ssid>" 就当非家庭处理
-        String ssid = info.getSSID();
-        if (TextUtils.isEmpty(ssid) || "<unknown ssid>".equals(ssid)) return false;
-        // getSSID() 返回的是带引号的字符串，需要去掉
-        ssid = ssid.replace("\"", "");
-
-        String homeSsids = Prefs.getHomeSsids(this);
-        if (TextUtils.isEmpty(homeSsids)) return false;
-
-        for (String candidate : homeSsids.split(",")) {
-            if (candidate.trim().equalsIgnoreCase(ssid)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     /** 根据当前 Prefs 状态更新菜单项标题。 */
     private void updateToggleMenuTitles() {
         boolean mobile = "mobile".equals(Prefs.getDisplayMode(this));
-        boolean auto = Prefs.isAutoNetwork(this);
         MenuItem displayItem = toolbar.getMenu().findItem(R.id.action_toggle_display);
         if (displayItem != null) {
             displayItem.setTitle(mobile
                     ? R.string.menu_toggle_display_to_desktop
                     : R.string.menu_toggle_display_to_mobile);
-        }
-        MenuItem autoItem = toolbar.getMenu().findItem(R.id.action_auto_network);
-        if (autoItem != null) {
-            autoItem.setTitle(auto
-                    ? R.string.menu_auto_network_on
-                    : R.string.menu_auto_network_off);
         }
     }
 
@@ -1538,7 +1494,6 @@ public class MainActivity extends AppCompatActivity {
         if (webView != null) {
             webView.onPause();
         }
-        unregisterNetworkCallback();
     }
 
     @Override
@@ -1547,9 +1502,6 @@ public class MainActivity extends AppCompatActivity {
         if (webView != null) {
             webView.onResume();
         }
-        registerNetworkCallback();
-        // 回到前台时也检测一次网络变化，用户可能在后台切了 WiFi
-        detectNetworkAndApply(false);
     }
 
     @Override

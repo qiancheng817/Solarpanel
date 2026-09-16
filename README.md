@@ -165,17 +165,23 @@ settings.setJavaScriptCanOpenWindowsAutomatically(true);
 
 ## 更新记录
 
-### v1.2.13 (Latest)
+### v1.2.14 (Latest)
 
-- **自动切换内外网模式**：新增基于 WiFi SSID 的自动检测。
-  菜单开启「自动切换内外网」，配置家庭 WiFi SSID（如 `MyHome-2.4G,MyHome-5G`）后：
-  连家庭 WiFi → 内网地址（`lan_url`）；其他 WiFi / 移动数据 → 外网地址（`url`）。
-  网络变化时通过 `ConnectivityManager.NetworkCallback` 自动触发切换。
-- **彻底删除手动切换内外网按钮**：避免与自动模式冲突。
-- **内网/外网模式持久化修复**：上游面板 `boot()` 异步加载后 `renderBase()` 会无条件把
-  `state.lanMode` 覆盖为后端 `default_lan_mode`，导致 App 注入的 lanMode 丢失。
-  改用 `setInterval` 轮询等 `state.groups` 有数据后再覆盖，不碰上游任何函数，
-  彻底消除对访客密码锁屏页的副作用。
+- **移除「自动切换内外网」功能**：删除该功能的全部代码、菜单项、
+  WiFi SSID 配置弹窗、相关注入脚本与 `ACCESS_NETWORK_STATE` /
+  `ACCESS_WIFI_STATE` 权限。
+- **修复电脑模式下打开部分外部网站直接崩溃**（如 `https://www.jying.top`
+  弹出「页面遇到意外问题，可以点击"重新加载"恢复」）：电脑模式拦截外部主文档时，
+  原先会把 WebView 的 `Accept-Encoding: gzip, deflate, br` 透传给服务器，
+  Cloudflare 等 CDN 因此返回 Brotli 压缩的 HTML，而 `HttpURLConnection`
+  不会自动解压 Brotli，压缩字节被当成明文交给 WebView → 主文档损坏、渲染进程崩溃。
+  现在显式只协商 `identity` 原文，另对 gzip / deflate 做魔数兜底解压，
+  并在转发响应头时剔除 `Content-Encoding` / `Content-Length` /
+  `Transfer-Encoding`；万一仍收到无法解码的编码（br / zstd），
+  自动放弃拦截、交给 WebView 原生网络栈加载。
+- **渲染进程崩溃自动恢复**：新增 `onRenderProcessGone` 兜底，
+  渲染进程意外终止时自动重建 WebView 并恢复崩溃前页面；
+  同一页面短时间内连续崩溃超过两次则停止自动重载，显示错误页由用户手动处理。
 
 ### v1.2.12
 
@@ -186,9 +192,6 @@ settings.setJavaScriptCanOpenWindowsAutomatically(true);
 - **屏幕比例切换**：菜单新增「切换为手机模式 / 切换为电脑模式」。
   手机模式用移动 UA + 保留 viewport meta（按 device-width 渲染）；
   电脑模式用桌面 UA + 网络层删 viewport（980px 桌面宽）。
-- **内网/外网卡片地址切换（手动）**：注入 JS 直接改上游面板全局 `state.lanMode`
-  并触发 `renderGroups()` 重渲染，卡片即时切换用内网地址（`lan_url`）或外网地址（`url`）。
-  v1.2.13 起改为自动模式，手动按钮已移除。
 
 ### v1.2.11
 
