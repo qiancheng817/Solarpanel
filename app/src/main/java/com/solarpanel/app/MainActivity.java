@@ -60,7 +60,8 @@ import java.util.Locale;
  * 2. 首次启动要求填写服务器地址，可在右上角菜单中随时修改；
  * 3. 允许明文 HTTP 与自签名证书，以适配局域网 / NAS 自托管环境；
  * 4. 支持后台管理面板所需的文件上传与文件下载；
- * 5. 返回键优先回退网页历史，双击退出应用。
+ * 5. 返回键优先回退网页历史，双击退出应用；
+ * 6. 适配面板 v2.1.00 的 PWA：清除数据时同步注销 Service Worker 并清空离线缓存。
  */
 public class MainActivity extends AppCompatActivity {
 
@@ -122,6 +123,27 @@ public class MainActivity extends AppCompatActivity {
                     + ".group-head .desc{min-width:0;}"
                     + "}';"
                     + "(document.head||document.documentElement).appendChild(s);"
+                    + "})();";
+
+    /**
+     * 面板 v2.1.00 起自带 PWA（Service Worker + Cache Storage 离线缓存）。
+     *
+     * 「清除缓存与登录状态」能清掉 Cookie、HTTP 缓存与 DOM 存储，但这三类都
+     * 不包含 SW 注册与 Cache Storage——不清的话，面板的离线缓存会一直残留，
+     * 「清除」名不副实。这段脚本在清除数据时执行：注销全部 SW 注册并清空
+     * Cache Storage。页面在非安全上下文（HTTP 内网地址）下本来就没有 SW，
+     * 脚本各分支都会自动跳过，不会有副作用。
+     */
+    private static final String PANEL_SW_CLEANUP_JS =
+            "(function(){"
+                    + "try{"
+                    + "if(navigator.serviceWorker&&navigator.serviceWorker.getRegistrations){"
+                    + "navigator.serviceWorker.getRegistrations().then(function(rs){"
+                    + "rs.forEach(function(r){try{r.unregister();}catch(e){}});}).catch(function(){});}"
+                    + "if(window.caches&&caches.keys){"
+                    + "caches.keys().then(function(ks){"
+                    + "ks.forEach(function(k){try{caches.delete(k);}catch(e){}});}).catch(function(){});}"
+                    + "}catch(e){}"
                     + "})();";
 
     /**
@@ -783,6 +805,10 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void clearWebData() {
+        // 面板 v2.1.00 起自带 PWA 离线缓存（Service Worker + Cache Storage），
+        // 不属于下面清理的 Cookie / HTTP 缓存 / DOM 存储任何一种，需要单独清
+        clearPanelServiceWorker();
+
         CookieManager cookieManager = CookieManager.getInstance();
         cookieManager.removeAllCookies(null);
         cookieManager.flush();
@@ -798,6 +824,11 @@ public class MainActivity extends AppCompatActivity {
         if (!TextUtils.isEmpty(server)) {
             webView.loadUrl(server);
         }
+    }
+
+    /** 注销面板注册的 Service Worker 并清空其离线缓存，详见 PANEL_SW_CLEANUP_JS。 */
+    private void clearPanelServiceWorker() {
+        webView.evaluateJavascript(PANEL_SW_CLEANUP_JS, null);
     }
 
     private void openInSystemBrowser() {
