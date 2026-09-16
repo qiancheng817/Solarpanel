@@ -170,28 +170,33 @@ public class MainActivity extends AppCompatActivity {
      * renderBase() L219 无条件执行 state.lanMode = s.default_lan_mode === 'lan'，
      * 会把 App 注入的 state.lanMode 覆盖回后端默认值。
      *
-     * 之前的做法是包装 renderBase 让它每次都覆盖回来，但这在访客密码锁屏页
-     * （renderBase 被调时 groups 还没加载）可能干扰面板自身的状态渲染。
+     * 不碰 renderBase（之前包装它导致访客密码锁屏页被干扰），
+     * 只设 window.__appLanMode 标记，然后用 setInterval 轮询：
+     * 每 100ms 检查 state.groups 是否有数据，一旦有就覆盖 state.lanMode
+     * 并重渲染卡片，然后 clearInterval 停掉。
+     * 最多轮询 200 次（20 秒）兜底自动清除，防止泄漏。
      *
-     * 新做法：不碰 renderBase，只设 window.__appLanMode 标记，
-     * 然后用 setTimeout 等 boot() 跑完（API.get 返回 + renderBase + renderGroups 都执行完），
-     * 再覆盖 state.lanMode 并重渲染卡片。
-     * 正常面板首页 API.get 一般在 100-300ms 内返回，延迟 500ms 足够。
-     * 访客密码锁屏页 boot() 会提前 return，500ms 后 state.groups 仍是空数组，
-     * renderGroups 有 length>0 守卫会跳过，不干扰锁屏。
+     * 访客密码锁屏页：boot() 提前 return → groups 永远是空数组 →
+     * 轮询 20 秒后自动清除，全程不执行任何 DOM 操作或 state 覆盖。
+     *
+     * 正常面板首页：API.get 返回 + renderBase + renderGroups 都跑完后，
+     * groups 有数据 → 下一次轮询就覆盖 lanMode。
+     * 不管网络多慢，覆盖一定能在 boot() 完成后的 100ms 内发生。
      */
     private static final String NETWORK_MODE_HOOK_JS =
             "(function(){try{"
                     + "window.__appLanMode=%s;"
-                    + "setTimeout(function(){"
-                    + "try{"
+                    + "var tries=0;"
+                    + "var timer=setInterval(function(){"
+                    + "tries++;"
                     + "if(typeof state!=='undefined'&&state!==null"
                     + "&&state.groups&&state.groups.length>0){"
+                    + "clearInterval(timer);"
                     + "state.lanMode=window.__appLanMode;"
                     + "if(typeof renderGroups==='function'){renderGroups();}"
                     + "}"
-                    + "}catch(e){}"
-                    + "},500);"
+                    + "if(tries>=200){clearInterval(timer);}"
+                    + "},100);"
                     + "}catch(e){})()";
 
     /** 切换按钮点了之后，直接改 window.__appLanMode + state.lanMode 并重渲染。 */
