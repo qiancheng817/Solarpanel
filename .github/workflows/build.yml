@@ -62,8 +62,12 @@ jobs:
 
       - name: Prepare signing keystore
         id: keystore
+        env:
+          # GitHub Secret 中配置的密钥库密码；未设置时回退为 solarpanel
+          KEYSTORE_PASSWORD: ${{ secrets.SOLARPANEL_KEYSTORE_PASSWORD || 'solarpanel' }}
         run: |
           set -e
+          echo "SOLARPANEL_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
           if [ -f keystore/solarpanel.jks ]; then
             echo "Using the keystore committed in the repository."
             echo "generated=false" >> "$GITHUB_OUTPUT"
@@ -74,7 +78,7 @@ jobs:
               -keystore keystore/solarpanel.jks \
               -alias solarpanel \
               -keyalg RSA -keysize 2048 -validity 10000 \
-              -storepass solarpanel -keypass solarpanel \
+              -storepass "$KEYSTORE_PASSWORD" -keypass "$KEYSTORE_PASSWORD" \
               -dname "CN=Solarpanel, OU=Self-hosted, O=Solarpanel, L=Local, ST=Local, C=CN"
             echo "generated=true" >> "$GITHUB_OUTPUT"
           fi

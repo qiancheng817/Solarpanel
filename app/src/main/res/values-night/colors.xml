@@ -1,6 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!--
+        深色模式覆盖色：所有颜色都在 values/colors.xml 中定义过一份，
+        这里只覆盖需要在深色下调整的项。保持浅色版的品牌色系（米白 + 天蓝 + 暖橙），
+        但降低亮度和饱和度，避免在深色背景上刺眼。
+    -->
+
     <color name="app_background">#12161A</color>
     <color name="app_text_primary">#E8EAED</color>
     <color name="app_text_secondary">#9AA1A9</color>
+
+    <!-- 顶栏背景：浅色版是 #3E7FA8，深色版降亮度降饱和度，避免亮蓝条割裂深色主题 -->
+    <color name="brand_blue_dark">#1C3C50</color>
+    <!-- ProgressBar tint：浅色版是 #7FB9DB，深色版也调暗 -->
+    <color name="brand_blue">#4D8BB0</color>
+
+    <!-- 次要色：浅色版 #C08A55，深色版保持暖色但压暗 -->
+    <color name="brand_tan_dark">#966B44</color>
+    <color name="brand_tan">#B08C66</color>
+
+    <!-- 顶栏文字在深色顶栏上仍然用白色，保持高对比度 -->
+    <color name="white">#FFFFFFFF</color>
 </resources>
