@@ -27,6 +27,9 @@
     <string name="menu_toggle_display_to_desktop">切换为电脑模式</string>
     <string name="menu_toggle_network_to_lan">切换为内网模式</string>
     <string name="menu_toggle_network_to_wan">切换为外网模式</string>
+    <string name="menu_auto_network_on">自动切换内外网（开）</string>
+    <string name="menu_auto_network_off">自动切换内外网（关）</string>
+    <string name="menu_home_ssids">配置家庭 WiFi SSID</string>
 
     <!-- 提示 -->
     <string name="toast_url_saved">服务器地址已保存</string>
@@ -42,6 +45,14 @@
     <string name="toast_display_desktop">已切换为电脑模式</string>
     <string name="toast_network_lan">已切换为内网模式（卡片使用内网地址）</string>
     <string name="toast_network_wan">已切换为外网模式（卡片使用外网地址）</string>
+    <string name="toast_auto_network_on">已开启自动切换：家庭 WiFi=内网，其他=外网</string>
+    <string name="toast_auto_network_off">已关闭自动切换</string>
+    <string name="toast_auto_switched_lan">自动检测到家庭 WiFi，已切内网</string>
+    <string name="toast_auto_switched_wan">自动检测到非家庭网络，已切外网</string>
+
+    <string name="ssid_dialog_title">配置家庭 WiFi SSID</string>
+    <string name="ssid_dialog_message">输入你家或办公室的 WiFi 名称（SSID），用逗号分隔。\n例如：MyHome-2.4G,MyHome-5G\n\n开启自动切换后，只有连接到这些 WiFi 时才用内网地址，其他 WiFi 或移动数据都用外网地址。</string>
+    <string name="ssid_dialog_hint">WiFi SSID，用逗号分隔</string>
 
     <!-- 对话框 -->
     <string name="dialog_ok">确定</string>

@@ -13,6 +13,8 @@ public final class Prefs {
     private static final String KEY_SERVER = "server_url";
     private static final String KEY_DISPLAY_MODE = "display_mode";   // desktop / mobile
     private static final String KEY_NETWORK_MODE = "network_mode";   // wan / lan
+    private static final String KEY_AUTO_NETWORK = "auto_network";   // boolean: 是否开启自动切换
+    private static final String KEY_HOME_SSIDS = "home_ssids";       // String: 逗号分隔的家庭 WiFi SSID 列表
 
     private Prefs() {
     }
@@ -53,5 +55,23 @@ public final class Prefs {
 
     public static void setNetworkMode(Context context, String mode) {
         store(context).edit().putString(KEY_NETWORK_MODE, mode).apply();
+    }
+
+    /** 自动切换内外网模式，默认关闭 */
+    public static boolean isAutoNetwork(Context context) {
+        return store(context).getBoolean(KEY_AUTO_NETWORK, false);
+    }
+
+    public static void setAutoNetwork(Context context, boolean on) {
+        store(context).edit().putBoolean(KEY_AUTO_NETWORK, on).apply();
+    }
+
+    /** 家庭 WiFi SSID 列表，逗号分隔 */
+    public static String getHomeSsids(Context context) {
+        return store(context).getString(KEY_HOME_SSIDS, "");
+    }
+
+    public static void setHomeSsids(Context context, String ssids) {
+        store(context).edit().putString(KEY_HOME_SSIDS, ssids).apply();
     }
 }

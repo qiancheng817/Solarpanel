@@ -25,6 +25,16 @@
         app:showAsAction="never" />
 
     <item
+        android:id="@+id/action_auto_network"
+        android:title="@string/menu_auto_network_off"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/action_config_ssids"
+        android:title="@string/menu_home_ssids"
+        app:showAsAction="never" />
+
+    <item
         android:id="@+id/action_change_server"
         android:title="@string/menu_change_server"
         app:showAsAction="never" />

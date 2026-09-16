@@ -8,8 +8,14 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
 import android.net.Uri;
 import android.net.http.SslError;
+import android.net.wifi.WifiInfo;
+import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
@@ -291,6 +297,11 @@ public class MainActivity extends AppCompatActivity {
     /** 网页是否已经开始上报滚动（正常情况恒为 true）。 */
     private volatile boolean jsScrollHookAlive;
     private float touchAnchorY;
+
+    /** 自动切换内外网所需的网络服务与回调。 */
+    private ConnectivityManager connectivityManager;
+    private WifiManager wifiManager;
+    private ConnectivityManager.NetworkCallback networkCallback;
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -626,6 +637,14 @@ public class MainActivity extends AppCompatActivity {
                 toggleNetworkMode();
                 return true;
             }
+            if (id == R.id.action_auto_network) {
+                toggleAutoNetworkMode();
+                return true;
+            }
+            if (id == R.id.action_config_ssids) {
+                showSsidConfigDialog();
+                return true;
+            }
             if (id == R.id.action_change_server) {
                 showSetupPanel(Prefs.getServer(this));
                 return true;
@@ -949,7 +968,7 @@ public class MainActivity extends AppCompatActivity {
 
     /**
      * 把当前网络模式（lan/wan）应用到面板页面。
-     * 不碰 renderBase，只设 window.__appLanMode + setTimeout 等 boot() 跑完再覆盖 state.lanMode。
+     * 不碰 renderBase，只设 window.__appLanMode + setInterval 轮询等 boot() 跑完再覆盖 state.lanMode。
      */
     private void applyNetworkModeToPage() {
         boolean lan = "lan".equals(Prefs.getNetworkMode(this));
@@ -957,10 +976,181 @@ public class MainActivity extends AppCompatActivity {
         webView.evaluateJavascript(js, null);
     }
 
-    /** 根据当前 Prefs 状态更新两个切换菜单项的标题（显示"将要切到的模式"）。 */
+    // ------------------------------------------------------------------
+    // 自动切换内外网
+    // ------------------------------------------------------------------
+
+    /** 切换自动模式开/关。关闭后恢复用户手动选择的模式。 */
+    private void toggleAutoNetworkMode() {
+        boolean wasAuto = Prefs.isAutoNetwork(this);
+        Prefs.setAutoNetwork(this, !wasAuto);
+        if (!wasAuto) {
+            // 打开自动模式 → 立即检测一次并应用
+            detectNetworkAndApply(true);
+            Toast.makeText(this, R.string.toast_auto_network_on, Toast.LENGTH_SHORT).show();
+            registerNetworkCallback();
+        } else {
+            // 关闭自动模式 → 恢复用户之前手动选的模式
+            applyNetworkModeToPage();
+            Toast.makeText(this, R.string.toast_auto_network_off, Toast.LENGTH_SHORT).show();
+        }
+        updateToggleMenuTitles();
+    }
+
+    /** 弹出对话框让用户输入家庭 WiFi SSID 列表。 */
+    private void showSsidConfigDialog() {
+        EditText input = new EditText(this);
+        input.setHint(R.string.ssid_dialog_hint);
+        input.setText(Prefs.getHomeSsids(this));
+        input.setInputType(InputType.TYPE_CLASS_TEXT);
+        int pad = (int) (16 * getResources().getDisplayMetrics().density);
+        input.setPadding(pad, pad, pad, pad);
+
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.ssid_dialog_title)
+                .setMessage(R.string.ssid_dialog_message)
+                .setView(input)
+                .setPositiveButton(R.string.dialog_ok, (dialog, which) -> {
+                    String ssids = input.getText().toString().trim();
+                    Prefs.setHomeSsids(this, ssids);
+                    // 保存后如果自动模式开着，立即重新检测
+                    if (Prefs.isAutoNetwork(this)) {
+                        detectNetworkAndApply(true);
+                    }
+                })
+                .setNegativeButton(R.string.dialog_cancel, null)
+                .show();
+    }
+
+    /** 注册网络变化监听。只有自动模式开着才需要监听。 */
+    private void registerNetworkCallback() {
+        if (!Prefs.isAutoNetwork(this)) return;
+        if (connectivityManager == null) {
+            connectivityManager = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+        }
+        if (wifiManager == null) {
+            wifiManager = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
+        }
+        if (connectivityManager == null || networkCallback != null) return;
+
+        networkCallback = new ConnectivityManager.NetworkCallback() {
+            @Override
+            public void onAvailable(Network network) {
+                runOnUiThread(() -> detectNetworkAndApply(true));
+            }
+
+            @Override
+            public void onLost(Network network) {
+                runOnUiThread(() -> detectNetworkAndApply(true));
+            }
+
+            @Override
+            public void onCapabilitiesChanged(Network network, NetworkCapabilities networkCapabilities) {
+                runOnUiThread(() -> detectNetworkAndApply(true));
+            }
+        };
+
+        NetworkRequest request = new NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build();
+        try {
+            connectivityManager.registerNetworkCallback(request, networkCallback);
+        } catch (IllegalArgumentException ignored) {
+            // 某些 ROM 上可能抛异常，忽略即可
+        }
+    }
+
+    private void unregisterNetworkCallback() {
+        if (connectivityManager != null && networkCallback != null) {
+            try {
+                connectivityManager.unregisterNetworkCallback(networkCallback);
+            } catch (IllegalArgumentException ignored) {
+            }
+            networkCallback = null;
+        }
+    }
+
+    /**
+     * 检测当前网络是否是家庭 WiFi，然后自动切换内外网模式。
+     *
+     * 判断逻辑：
+     * - 自动模式没开 → 不做任何事
+     * - 当前是移动数据（蜂窝）→ 外网
+     * - 当前是 WiFi → 取 SSID 和 Prefs 里的家庭 SSID 列表比对
+     *   - 匹配 → 内网
+     *   - 不匹配 → 外网
+     *
+     * @param showToast 是否在模式切换时弹 Toast（自动检测触发时 false，用户手动触发时 true）
+     */
+    private void detectNetworkAndApply(boolean showToast) {
+        if (!Prefs.isAutoNetwork(this)) return;
+
+        boolean shouldBeLan = false;
+        ConnectivityManager cm = connectivityManager != null ? connectivityManager
+                : (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+        if (cm != null) {
+            NetworkCapabilities caps = cm.getNetworkCapabilities(cm.getActiveNetwork());
+            if (caps != null) {
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+                    // 移动数据 → 外网
+                    shouldBeLan = false;
+                } else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                    // WiFi → 检查 SSID
+                    shouldBeLan = isHomeWifi();
+                } else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) {
+                    // 有线（模拟以太网等）→ 大概率在家
+                    shouldBeLan = true;
+                }
+            }
+        }
+
+        String targetMode = shouldBeLan ? "lan" : "wan";
+        String currentMode = Prefs.getNetworkMode(this);
+        if (!targetMode.equals(currentMode)) {
+            Prefs.setNetworkMode(this, targetMode);
+            applyNetworkModeToPage();
+            if (showToast) {
+                Toast.makeText(this,
+                        shouldBeLan ? R.string.toast_auto_switched_lan : R.string.toast_auto_switched_wan,
+                        Toast.LENGTH_SHORT).show();
+            }
+            updateToggleMenuTitles();
+        }
+    }
+
+    /** 判断当前连接的 WiFi SSID 是否在家庭 SSID 列表里。 */
+    private boolean isHomeWifi() {
+        if (wifiManager == null) {
+            wifiManager = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
+        }
+        if (wifiManager == null) return false;
+
+        WifiInfo info = wifiManager.getConnectionInfo();
+        if (info == null) return false;
+
+        // Android 10+ 需要 ACCESS_FINE_LOCATION 才能拿到真实 SSID，
+        // 如果拿到 "<unknown ssid>" 就当非家庭处理
+        String ssid = info.getSSID();
+        if (TextUtils.isEmpty(ssid) || "<unknown ssid>".equals(ssid)) return false;
+        // getSSID() 返回的是带引号的字符串，需要去掉
+        ssid = ssid.replace("\"", "");
+
+        String homeSsids = Prefs.getHomeSsids(this);
+        if (TextUtils.isEmpty(homeSsids)) return false;
+
+        for (String candidate : homeSsids.split(",")) {
+            if (candidate.trim().equalsIgnoreCase(ssid)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 根据当前 Prefs 状态更新三个切换菜单项的标题。 */
     private void updateToggleMenuTitles() {
         boolean mobile = "mobile".equals(Prefs.getDisplayMode(this));
         boolean lan = "lan".equals(Prefs.getNetworkMode(this));
+        boolean auto = Prefs.isAutoNetwork(this);
         MenuItem displayItem = toolbar.getMenu().findItem(R.id.action_toggle_display);
         if (displayItem != null) {
             displayItem.setTitle(mobile
@@ -969,9 +1159,24 @@ public class MainActivity extends AppCompatActivity {
         }
         MenuItem networkItem = toolbar.getMenu().findItem(R.id.action_toggle_network);
         if (networkItem != null) {
-            networkItem.setTitle(lan
-                    ? R.string.menu_toggle_network_to_wan
-                    : R.string.menu_toggle_network_to_lan);
+            if (auto) {
+                // 自动模式开启时，手动切换按钮提示当前自动检测到的模式
+                networkItem.setTitle(lan
+                        ? R.string.toast_auto_switched_lan
+                        : R.string.toast_auto_switched_wan);
+                networkItem.setEnabled(false);
+            } else {
+                networkItem.setTitle(lan
+                        ? R.string.menu_toggle_network_to_wan
+                        : R.string.menu_toggle_network_to_lan);
+                networkItem.setEnabled(true);
+            }
+        }
+        MenuItem autoItem = toolbar.getMenu().findItem(R.id.action_auto_network);
+        if (autoItem != null) {
+            autoItem.setTitle(auto
+                    ? R.string.menu_auto_network_on
+                    : R.string.menu_auto_network_off);
         }
     }
 
@@ -1375,6 +1580,7 @@ public class MainActivity extends AppCompatActivity {
         if (webView != null) {
             webView.onPause();
         }
+        unregisterNetworkCallback();
     }
 
     @Override
@@ -1383,6 +1589,9 @@ public class MainActivity extends AppCompatActivity {
         if (webView != null) {
             webView.onResume();
         }
+        registerNetworkCallback();
+        // 回到前台时也检测一次网络变化，用户可能在后台切了 WiFi
+        detectNetworkAndApply(false);
     }
 
     @Override
