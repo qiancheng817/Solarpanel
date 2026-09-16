@@ -185,4 +185,4 @@ settings.setJavaScriptCanOpenWindowsAutomatically(true);
 
 ## 许可
 
-MIT，与上游 Solarpanel 项目保持一致。
+随便用，出问题不负责
