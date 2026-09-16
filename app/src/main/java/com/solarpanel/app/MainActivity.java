@@ -164,6 +164,22 @@ public class MainActivity extends AppCompatActivity {
                     + "})();";
 
     /**
+     * 切换上游面板的卡片地址模式（内网 / 外网）。
+     *
+     * 上游 index.js 在全局作用域定义 const state，state.lanMode 为 true 时
+     * 卡片用 lan_url（内网地址），否则用 url（外网地址）。
+     * renderGroups() 会按当前 state 重新渲染所有卡片。
+     * 这里直接改 state.lanMode 并触发重渲染，无需重载页面或调后端 API。
+     */
+    private static final String NETWORK_TOGGLE_JS_TEMPLATE =
+            "try{"
+                    + "if(typeof state!=='undefined'&&state!==null){"
+                    + "state.lanMode=%s;"
+                    + "if(typeof renderGroups==='function'){renderGroups();}"
+                    + "}"
+                    + "}catch(e){}";
+
+    /**
      * 面板 v2.1.00 起自带 PWA（Service Worker + Cache Storage 离线缓存）。
      *
      * 「清除缓存与登录状态」能清掉 Cookie、HTTP 缓存与 DOM 存储，但这三类都
@@ -328,14 +344,10 @@ public class MainActivity extends AppCompatActivity {
 
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
 
-        // 强制桌面端 UA：不含 "Mobile" 标记，让 fnOS / 飞牛等桌面端服务器返回桌面布局。
-        // Solarpanel 自己的面板有 viewport meta + 响应式 CSS，即使收到桌面 UA 也会按 device-width 正确渲染。
-        // 相当于 Chrome 浏览器里的 "桌面版网站" 模式。
-        userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                + "AppleWebKit/537.36 (KHTML, like Gecko) "
-                + "Chrome/126.0.6478.126 Safari/537.36 "
-                + "SolarpanelAndroid/" + BuildConfig.VERSION_NAME;
-        settings.setUserAgentString(userAgent);
+        // 根据「屏幕比例模式」设置 UA：desktop 模式用桌面 UA（不含 Mobile），
+        // 让 fnOS / 飞牛等桌面端服务器返回桌面布局；mobile 模式用移动 UA，
+        // 配合 shouldInterceptRequest 不删 viewport，页面按 device-width 渲染。
+        applyUserAgent();
 
         CookieManager cookieManager = CookieManager.getInstance();
         cookieManager.setAcceptCookie(true);
@@ -346,6 +358,29 @@ public class MainActivity extends AppCompatActivity {
 
         // 暴露给网页的最小接口：只用来上报滚动方向，供顶栏自动收放使用
         webView.addJavascriptInterface(new ScrollBridge(), "SolarpanelHost");
+    }
+
+    /**
+     * 根据 Prefs 中的 display_mode 设置 User-Agent。
+     * desktop：桌面 UA（不含 Mobile），配合 shouldInterceptRequest 删 viewport → 桌面宽渲染
+     * mobile：移动 UA（含 Mobile），配合 shouldInterceptRequest 不拦截 → 按 device-width 渲染
+     */
+    private void applyUserAgent() {
+        boolean mobile = "mobile".equals(Prefs.getDisplayMode(this));
+        String ua;
+        if (mobile) {
+            ua = "Mozilla/5.0 (Linux; Android 14; Pixel 8) "
+                    + "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    + "Chrome/126.0.6478.126 Mobile Safari/537.36 "
+                    + "SolarpanelAndroid/" + BuildConfig.VERSION_NAME;
+        } else {
+            ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    + "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    + "Chrome/126.0.6478.126 Safari/537.36 "
+                    + "SolarpanelAndroid/" + BuildConfig.VERSION_NAME;
+        }
+        userAgent = ua;
+        webView.getSettings().setUserAgentString(ua);
     }
 
     private void configureWebChromeClient() {
@@ -425,6 +460,10 @@ public class MainActivity extends AppCompatActivity {
                 if (!request.isForMainFrame()) {
                     return null;   // 只拦主文档，图片/JS/CSS 等子资源放行
                 }
+                // 手机模式：保留 viewport meta，让页面按 device-width 渲染，不拦截
+                if ("mobile".equals(Prefs.getDisplayMode(MainActivity.this))) {
+                    return null;
+                }
                 // 只拦截 GET 主文档请求。
                 // POST（如表单登录提交）等带 body 的请求必须交给 WebView 原生处理，
                 // 否则 fetchAndStripViewport 会把 POST 强转成 GET，body 被丢弃，
@@ -479,6 +518,7 @@ public class MainActivity extends AppCompatActivity {
                 // 这里不需要再通过 JS 事后删除（时机太晚）
                 injectPanelCssFix();
                 injectScrollHook();
+                applyNetworkModeToPage();
                 updateCloseButton();
             }
 
@@ -489,6 +529,7 @@ public class MainActivity extends AppCompatActivity {
                 // （viewport meta 在第一次 load 时就被删了，后续 SPA 切换不会重新插入）
                 injectPanelCssFix();
                 injectScrollHook();
+                applyNetworkModeToPage();
                 updateCloseButton();
             }
 
@@ -546,6 +587,14 @@ public class MainActivity extends AppCompatActivity {
                 }
                 return true;
             }
+            if (id == R.id.action_toggle_display) {
+                toggleDisplayMode();
+                return true;
+            }
+            if (id == R.id.action_toggle_network) {
+                toggleNetworkMode();
+                return true;
+            }
             if (id == R.id.action_change_server) {
                 showSetupPanel(Prefs.getServer(this));
                 return true;
@@ -564,6 +613,8 @@ public class MainActivity extends AppCompatActivity {
             }
             return false;
         });
+        // 初始化切换菜单项标题（根据 Prefs 当前值显示"将要切到的模式"）
+        updateToggleMenuTitles();
     }
 
     private void configureBackHandling() {
@@ -800,12 +851,21 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
 
-            // 复制响应头（主要是 Content-Type）
+            // 复制响应头（主要是 Content-Type），跳过会误导 WebView 的编码/长度头：
+            // body 已被 HttpURLConnection 自动 gunzip 并被我们以 UTF-8 重新编码，
+            // 原始 Content-Encoding / Content-Length 不再适用，
+            // 保留 gzip 头会让 WebView 误以为 body 仍是压缩流，二次解压失败 → 页面黑屏。
             Map<String, String> respHeaders = new LinkedHashMap<>();
             for (Map.Entry<String, List<String>> e : conn.getHeaderFields().entrySet()) {
-                if (e.getKey() != null && e.getValue() != null && !e.getValue().isEmpty()) {
-                    respHeaders.put(e.getKey(), e.getValue().get(0));
+                if (e.getKey() == null || e.getValue() == null || e.getValue().isEmpty()) {
+                    continue;
                 }
+                String hk = e.getKey();
+                if (hk.equalsIgnoreCase("Content-Encoding")
+                        || hk.equalsIgnoreCase("Content-Length")) {
+                    continue;
+                }
+                respHeaders.put(hk, e.getValue().get(0));
             }
 
             ByteArrayInputStream responseBody = new ByteArrayInputStream(html.getBytes(StandardCharsets.UTF_8));
@@ -829,6 +889,56 @@ public class MainActivity extends AppCompatActivity {
         String home = Prefs.getServer(this);
         boolean atHome = !TextUtils.isEmpty(home) && Urls.isSamePage(webView.getUrl(), home);
         item.setVisible(!atHome);
+    }
+
+    /** 切换桌面/手机屏幕比例模式，切换后重新加载当前页使 UA 和 viewport 策略生效。 */
+    private void toggleDisplayMode() {
+        boolean toMobile = "desktop".equals(Prefs.getDisplayMode(this));
+        Prefs.setDisplayMode(this, toMobile ? "mobile" : "desktop");
+        applyUserAgent();
+        updateToggleMenuTitles();
+        Toast.makeText(this,
+                toMobile ? R.string.toast_display_mobile : R.string.toast_display_desktop,
+                Toast.LENGTH_SHORT).show();
+        if (webView.getUrl() != null) {
+            webView.reload();
+        }
+    }
+
+    /** 切换内网/外网卡片地址模式，直接注入 JS 改 state.lanMode 并重渲染，无需重载页面。 */
+    private void toggleNetworkMode() {
+        boolean toLan = "wan".equals(Prefs.getNetworkMode(this));
+        Prefs.setNetworkMode(this, toLan ? "lan" : "wan");
+        applyNetworkModeToPage();
+        updateToggleMenuTitles();
+        Toast.makeText(this,
+                toLan ? R.string.toast_network_lan : R.string.toast_network_wan,
+                Toast.LENGTH_SHORT).show();
+    }
+
+    /** 把当前网络模式（lan/wan）应用到面板页面：注入 JS 设置 state.lanMode 并触发 renderGroups()。 */
+    private void applyNetworkModeToPage() {
+        boolean lan = "lan".equals(Prefs.getNetworkMode(this));
+        String js = String.format(NETWORK_TOGGLE_JS_TEMPLATE, lan ? "true" : "false");
+        webView.evaluateJavascript(js, null);
+    }
+
+    /** 根据当前 Prefs 状态更新两个切换菜单项的标题（显示"将要切到的模式"）。 */
+    private void updateToggleMenuTitles() {
+        boolean mobile = "mobile".equals(Prefs.getDisplayMode(this));
+        boolean lan = "lan".equals(Prefs.getNetworkMode(this));
+        MenuItem displayItem = toolbar.getMenu().findItem(R.id.action_toggle_display);
+        if (displayItem != null) {
+            displayItem.setTitle(mobile
+                    ? R.string.menu_toggle_display_to_desktop
+                    : R.string.menu_toggle_display_to_mobile);
+        }
+        MenuItem networkItem = toolbar.getMenu().findItem(R.id.action_toggle_network);
+        if (networkItem != null) {
+            networkItem.setTitle(lan
+                    ? R.string.menu_toggle_network_to_wan
+                    : R.string.menu_toggle_network_to_lan);
+        }
     }
 
     /** 关闭当前服务页面，回到面板首页。 */

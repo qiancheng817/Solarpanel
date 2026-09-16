@@ -11,6 +11,8 @@ public final class Prefs {
 
     private static final String FILE_NAME = "solarpanel_prefs";
     private static final String KEY_SERVER = "server_url";
+    private static final String KEY_DISPLAY_MODE = "display_mode";   // desktop / mobile
+    private static final String KEY_NETWORK_MODE = "network_mode";   // wan / lan
 
     private Prefs() {
     }
@@ -31,5 +33,25 @@ public final class Prefs {
 
     public static void clearServer(Context context) {
         store(context).edit().remove(KEY_SERVER).apply();
+    }
+
+    /** 桌面/手机屏幕比例模式，默认 desktop */
+    public static String getDisplayMode(Context context) {
+        String v = store(context).getString(KEY_DISPLAY_MODE, "desktop");
+        return "mobile".equals(v) ? "mobile" : "desktop";
+    }
+
+    public static void setDisplayMode(Context context, String mode) {
+        store(context).edit().putString(KEY_DISPLAY_MODE, mode).apply();
+    }
+
+    /** 卡片地址模式：wan（外网，默认）/ lan（内网） */
+    public static String getNetworkMode(Context context) {
+        String v = store(context).getString(KEY_NETWORK_MODE, "wan");
+        return "lan".equals(v) ? "lan" : "wan";
+    }
+
+    public static void setNetworkMode(Context context, String mode) {
+        store(context).edit().putString(KEY_NETWORK_MODE, mode).apply();
     }
 }

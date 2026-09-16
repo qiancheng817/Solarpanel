@@ -15,6 +15,16 @@
         app:showAsAction="never" />
 
     <item
+        android:id="@+id/action_toggle_display"
+        android:title="@string/menu_toggle_display_to_mobile"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/action_toggle_network"
+        android:title="@string/menu_toggle_network_to_lan"
+        app:showAsAction="never" />
+
+    <item
         android:id="@+id/action_change_server"
         android:title="@string/menu_change_server"
         app:showAsAction="never" />
