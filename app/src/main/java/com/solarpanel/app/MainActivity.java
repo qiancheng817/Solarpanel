@@ -959,7 +959,10 @@ public class MainActivity extends AppCompatActivity {
     private void toggleNetworkMode() {
         boolean toLan = "wan".equals(Prefs.getNetworkMode(this));
         Prefs.setNetworkMode(this, toLan ? "lan" : "wan");
-        applyNetworkModeToPage();
+        // 手动切换用立即生效的 JS（页面已加载，groups 肯定有数据）
+        String js = String.format(NETWORK_TOGGLE_JS_TEMPLATE,
+                toLan ? "true" : "false", toLan ? "true" : "false");
+        webView.evaluateJavascript(js, null);
         updateToggleMenuTitles();
         Toast.makeText(this,
                 toLan ? R.string.toast_network_lan : R.string.toast_network_wan,
@@ -1159,18 +1162,11 @@ public class MainActivity extends AppCompatActivity {
         }
         MenuItem networkItem = toolbar.getMenu().findItem(R.id.action_toggle_network);
         if (networkItem != null) {
-            if (auto) {
-                // 自动模式开启时，手动切换按钮提示当前自动检测到的模式
-                networkItem.setTitle(lan
-                        ? R.string.toast_auto_switched_lan
-                        : R.string.toast_auto_switched_wan);
-                networkItem.setEnabled(false);
-            } else {
-                networkItem.setTitle(lan
-                        ? R.string.menu_toggle_network_to_wan
-                        : R.string.menu_toggle_network_to_lan);
-                networkItem.setEnabled(true);
-            }
+            // 无论自动模式开不开，手动切换按钮都可用
+            networkItem.setTitle(lan
+                    ? R.string.menu_toggle_network_to_wan
+                    : R.string.menu_toggle_network_to_lan);
+            networkItem.setEnabled(true);
         }
         MenuItem autoItem = toolbar.getMenu().findItem(R.id.action_auto_network);
         if (autoItem != null) {
