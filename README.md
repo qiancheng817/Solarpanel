@@ -165,7 +165,19 @@ settings.setJavaScriptCanOpenWindowsAutomatically(true);
 
 ## 更新记录
 
-### v1.2.12 (Latest)
+### v1.2.13 (Latest)
+
+- **自动切换内外网模式**：新增基于 WiFi SSID 的自动检测。
+  菜单开启「自动切换内外网」，配置家庭 WiFi SSID（如 `MyHome-2.4G,MyHome-5G`）后：
+  连家庭 WiFi → 内网地址（`lan_url`）；其他 WiFi / 移动数据 → 外网地址（`url`）。
+  网络变化时通过 `ConnectivityManager.NetworkCallback` 自动触发切换。
+- **彻底删除手动切换内外网按钮**：避免与自动模式冲突。
+- **内网/外网模式持久化修复**：上游面板 `boot()` 异步加载后 `renderBase()` 会无条件把
+  `state.lanMode` 覆盖为后端 `default_lan_mode`，导致 App 注入的 lanMode 丢失。
+  改用 `setInterval` 轮询等 `state.groups` 有数据后再覆盖，不碰上游任何函数，
+  彻底消除对访客密码锁屏页的副作用。
+
+### v1.2.12
 
 - **修复黑屏**：`fetchAndStripViewport` 拦截外部页面主文档时，复制响应头漏掉了
   `Content-Encoding` / `Content-Length` 过滤——`HttpURLConnection` 已自动解压 gzip body，
@@ -174,10 +186,9 @@ settings.setJavaScriptCanOpenWindowsAutomatically(true);
 - **屏幕比例切换**：菜单新增「切换为手机模式 / 切换为电脑模式」。
   手机模式用移动 UA + 保留 viewport meta（按 device-width 渲染）；
   电脑模式用桌面 UA + 网络层删 viewport（980px 桌面宽）。
-- **内网/外网卡片地址切换**：菜单新增「切换为内网模式 / 切换为外网模式」。
-  注入 JS 直接改上游面板全局 `state.lanMode` 并触发 `renderGroups()` 重渲染，
-  卡片即时切换用内网地址（`lan_url`）或外网地址（`url`），无需重载页面、无需改面板后端。
-  设置持久化，退出重进保持。
+- **内网/外网卡片地址切换（手动）**：注入 JS 直接改上游面板全局 `state.lanMode`
+  并触发 `renderGroups()` 重渲染，卡片即时切换用内网地址（`lan_url`）或外网地址（`url`）。
+  v1.2.13 起改为自动模式，手动按钮已移除。
 
 ### v1.2.11
 
@@ -191,16 +202,13 @@ settings.setJavaScriptCanOpenWindowsAutomatically(true);
 ### v1.2.10
 
 - 在 v1.2.09 网络层拦截删除 viewport 方案基础上的稳定版本。
-  该版本对应仓库初始同步的源码状态（`versionCode 15`）。
+  网络层拦截外部页面主文档 HTML，正则移除 viewport meta，实现桌面版网站模式。
 
 ### v1.2.0
 
-- 适配上游面板 v2.1.00（2026-09-15 发布）：面板新增 PWA（Service Worker + Cache Storage 离线缓存）。
+- 适配上游面板 v2.1.00：面板新增 PWA（Service Worker + Cache Storage 离线缓存）。
   「清除缓存与登录状态」现在会同步注销面板注册的 Service Worker 并清空其离线缓存，
   避免清除之后离线缓存仍然残留；断网时的兜底页由面板自带的 `offline.html` 承担。
-- 面板其余新功能——热点新闻双视图、浏览器书签导入、TOTP 两步验证、审计日志、
-  自定义 RSS、每日壁纸（Bing）、快速添加卡片等——均为面板服务端能力，
-  在应用内 WebView 直接可用，无需客户端改动。
 
 ### v1.1.0
 
