@@ -38,12 +38,13 @@ import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.Toast;
 
+import android.widget.FrameLayout;
+
 import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
-import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
 import com.google.android.material.appbar.MaterialToolbar;
 import com.google.android.material.button.MaterialButton;
@@ -107,7 +108,7 @@ public class MainActivity extends AppCompatActivity {
     private static final boolean ALLOW_SELF_SIGNED_CERTIFICATE = true;
 
     private WebView webView;
-    private SwipeRefreshLayout swipeRefresh;
+    private FrameLayout swipeRefresh;
     private ProgressBar progressBar;
     private MaterialToolbar toolbar;
     private View topBar;
@@ -213,15 +214,6 @@ public class MainActivity extends AppCompatActivity {
 
         // 暴露给网页的最小接口：只用来上报滚动方向，供顶栏自动收放使用
         webView.addJavascriptInterface(new ScrollBridge(), "SolarpanelHost");
-
-        swipeRefresh.setColorSchemeResources(R.color.brand_blue_dark, R.color.brand_tan_dark);
-        swipeRefresh.setOnRefreshListener(() -> {
-            if (webView.getUrl() != null) {
-                webView.reload();
-            } else {
-                swipeRefresh.setRefreshing(false);
-            }
-        });
     }
 
     private void configureWebChromeClient() {
@@ -286,14 +278,12 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 mainFrameFailed = false;
-                swipeRefresh.setRefreshing(false);
                 // 新页面开始加载时先把顶栏放出来，进度条与关闭按钮才看得见
                 applyTopBarState(false, true);
             }
 
             @Override
             public void onPageFinished(WebView view, String url) {
-                swipeRefresh.setRefreshing(false);
                 if (!mainFrameFailed) {
                     hideErrorPanel();
                 }
@@ -695,7 +685,6 @@ public class MainActivity extends AppCompatActivity {
     private void showErrorPanel() {
         errorPanel.setVisibility(View.VISIBLE);
         progressBar.setVisibility(View.GONE);
-        swipeRefresh.setRefreshing(false);
     }
 
     private void hideErrorPanel() {

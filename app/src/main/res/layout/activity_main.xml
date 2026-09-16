@@ -11,7 +11,7 @@
         所以网页顶部不会被顶栏挡住；顶栏收起时这段位移归零，
         可视区域立刻变大，而且不需要让 WebView 重新布局（不会造成网页回流抖动）。
     -->
-    <androidx.swiperefreshlayout.widget.SwipeRefreshLayout
+    <FrameLayout
         android:id="@+id/swipeRefresh"
         android:layout_width="match_parent"
         android:layout_height="match_parent">
@@ -21,7 +21,7 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
 
-    </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
+    </FrameLayout>
 
     <!--
         顶栏：覆盖在网页之上，下滑自动收起、上滑自动出现。
