@@ -205,17 +205,6 @@ public class MainActivity extends AppCompatActivity {
                     + "},100);"
                     + "}catch(e){})()";
 
-    /** 切换按钮点了之后，直接改 window.__appLanMode + state.lanMode 并重渲染。 */
-    private static final String NETWORK_TOGGLE_JS_TEMPLATE =
-            "try{"
-                    + "if(typeof state!=='undefined'&&state!==null){"
-                    + "window.__appLanMode=%s;"
-                    + "state.lanMode=%s;"
-                    + "if(typeof renderGroups==='function'"
-                    + "&&state.groups&&state.groups.length>0){renderGroups();}"
-                    + "}"
-                    + "}catch(e){}";
-
     /**
      * 面板 v2.1.00 起自带 PWA（Service Worker + Cache Storage 离线缓存）。
      *
@@ -633,10 +622,6 @@ public class MainActivity extends AppCompatActivity {
                 toggleDisplayMode();
                 return true;
             }
-            if (id == R.id.action_toggle_network) {
-                toggleNetworkMode();
-                return true;
-            }
             if (id == R.id.action_auto_network) {
                 toggleAutoNetworkMode();
                 return true;
@@ -955,20 +940,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /** 切换内网/外网卡片地址模式，直接注入 JS 改 state.lanMode 并重渲染，无需重载页面。 */
-    private void toggleNetworkMode() {
-        boolean toLan = "wan".equals(Prefs.getNetworkMode(this));
-        Prefs.setNetworkMode(this, toLan ? "lan" : "wan");
-        // 手动切换用立即生效的 JS（页面已加载，groups 肯定有数据）
-        String js = String.format(NETWORK_TOGGLE_JS_TEMPLATE,
-                toLan ? "true" : "false", toLan ? "true" : "false");
-        webView.evaluateJavascript(js, null);
-        updateToggleMenuTitles();
-        Toast.makeText(this,
-                toLan ? R.string.toast_network_lan : R.string.toast_network_wan,
-                Toast.LENGTH_SHORT).show();
-    }
-
     /**
      * 把当前网络模式（lan/wan）应用到面板页面。
      * 不碰 renderBase，只设 window.__appLanMode + setInterval 轮询等 boot() 跑完再覆盖 state.lanMode。
@@ -1149,24 +1120,15 @@ public class MainActivity extends AppCompatActivity {
         return false;
     }
 
-    /** 根据当前 Prefs 状态更新三个切换菜单项的标题。 */
+    /** 根据当前 Prefs 状态更新菜单项标题。 */
     private void updateToggleMenuTitles() {
         boolean mobile = "mobile".equals(Prefs.getDisplayMode(this));
-        boolean lan = "lan".equals(Prefs.getNetworkMode(this));
         boolean auto = Prefs.isAutoNetwork(this);
         MenuItem displayItem = toolbar.getMenu().findItem(R.id.action_toggle_display);
         if (displayItem != null) {
             displayItem.setTitle(mobile
                     ? R.string.menu_toggle_display_to_desktop
                     : R.string.menu_toggle_display_to_mobile);
-        }
-        MenuItem networkItem = toolbar.getMenu().findItem(R.id.action_toggle_network);
-        if (networkItem != null) {
-            // 无论自动模式开不开，手动切换按钮都可用
-            networkItem.setTitle(lan
-                    ? R.string.menu_toggle_network_to_wan
-                    : R.string.menu_toggle_network_to_lan);
-            networkItem.setEnabled(true);
         }
         MenuItem autoItem = toolbar.getMenu().findItem(R.id.action_auto_network);
         if (autoItem != null) {
