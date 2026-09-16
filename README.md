@@ -165,7 +165,7 @@ settings.setJavaScriptCanOpenWindowsAutomatically(true);
 
 ## 更新记录
 
-### v1.2.12
+### v1.2.12 (Latest)
 
 - **修复黑屏**：`fetchAndStripViewport` 拦截外部页面主文档时，复制响应头漏掉了
   `Content-Encoding` / `Content-Length` 过滤——`HttpURLConnection` 已自动解压 gzip body，
@@ -187,130 +187,11 @@ settings.setJavaScriptCanOpenWindowsAutomatically(true);
   "点登录后页面刷新一遍但登不上"。改为只拦截 GET，POST 等带 body 的请求放行给 WebView。
 - **移除下拉刷新**：删除 `SwipeRefreshLayout`（布局 / Java / 依赖三处），
   顶栏自动收放的 `translationY` 改为直接作用于 `WebView`。
-- 同步本地最新源码到仓库（`strings.xml`、`Urls.java`、`colors.xml`、
-  `AndroidManifest.xml`、`README.md`、`build.yml`）。
 
 ### v1.2.10
 
 - 在 v1.2.09 网络层拦截删除 viewport 方案基础上的稳定版本。
   该版本对应仓库初始同步的源码状态（`versionCode 15`）。
-
-### v1.2.09
-
-- **彻底修复桌面端页面堆砌问题**：v1.2.07 改了 UA、v1.2.08 加了 JS 事后删除 viewport meta，
-  都不行——因为等到 JS 能执行时，渲染引擎已经按 viewport meta 在 360px 完成了 layout + paint。
-  这次改为**网络层拦截**：用 `shouldInterceptRequest` 捕获外部页面（非 Solarpanel 自己）
-  的主文档 HTML，自己发起 HTTP 请求（带桌面 UA + Cookie），正则删掉
-  `<meta name="viewport" ...>` 标签后再返回给 WebView。
-  渲染引擎从第一帧开始就看不到 viewport meta，直接用默认 ~980px 桌面宽度渲染，
-  再配合 `setLoadWithOverviewMode(true)` + `setInitialScale(0)` 自动等比缩小到手机屏幕。
-  效果等同于 Chrome 浏览器的「桌面版网站」模式。
-- 删除 v1.2.08 基于 JS 的 `injectDesktopViewport()` 方法（时机太晚，无效）。
-
-### v1.2.08
-
-- **根因修复（补全 Chrome 桌面模式的第二步）**：v1.2.07 只做了「改 UA 为桌面 Chrome」，
-  但 fnOS 等桌面端 HTML 里有 `<meta name="viewport" content="width=device-width">`，
-  WebView 还是按 360px 手机宽度渲染，CSS media query 照样触发移动端堆叠布局。
-  Chrome 的「桌面版网站」实际做了**两件事**：①改 UA ②忽略 viewport meta。
-  这次补上第 2 步：新增 `injectDesktopViewport()` 在 `onPageCommitVisible`（最早
-  可操作 DOM 的时机）和 `onPageFinished` 里删除 viewport meta，强制 WebView
-  用默认 ~980px 桌面宽度渲染，再配合 `setLoadWithOverviewMode` +
-  `setInitialScale(0)` 自动等比缩小到手机屏幕。
-- **Solarpanel 自身页面跳过 viewport 删除**：通过 URL host 匹配判断是不是
-  用户配置的 Solarpanel 服务器地址，是的话不动它的 viewport（它有响应式 CSS，
-  手机宽度渲染效果更好）。只有外部链接（fnOS 等）才强制用桌面宽度。
-
-### v1.2.07
-
-- **根因修复**：飞牛 fnOS / 桌面端 NAS 后台出现"横向堆砌"（导航栏压成窄条、
-  监控面板截断）的根因是 WebView UA 字符串里带了 "Mobile" 标记，服务器据此
-  返回了为移动端设计的布局。改为**桌面端 Chrome UA**：
-  `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ... Chrome/126 ...`
-  不含 "Mobile"，效果等同于 Chrome 浏览器的「桌面版网站」模式。
-  Solarpanel 自己有 viewport meta + 响应式 CSS，收到桌面 UA 也能正确渲染。
-- 移除 v1.2.06 中添加的悬浮方向切换按钮：横屏无法解决服务器返回移动端布局
-  的问题，且 v1.2.07 正确的桌面布局 + `setInitialScale(0)` 整页等比缩小后，
-  横屏收益有限。
-- 保持 v1.2.06 的**下拉刷新**（SwipeRefreshLayout）功能不变。
-
-### v1.2.06
-
-- 新增：下拉刷新当前页面。`FrameLayout` 容器换成了 `SwipeRefreshLayout`，
-  原生支持"在页面顶部继续下滑触发刷新"手势，和网页内部滚动完全不冲突。
-- 新增：右下角悬浮按钮可一键切换竖屏 / 横屏。Manifest 已声明
-  `configChanges`，旋转不会销毁 WebView，页面状态完整保留。
-- 新增依赖 `androidx.swiperefreshlayout:swiperefreshlayout:1.1.0`。
-
-### v1.2.05
-
-- 修复：桌面端网页（如飞牛 fnOS）被 app "视觉堆叠"——左侧导航栏被压成窄条、
-  右上角监控面板只露一半。根因是 v1.2.04 错误地给桌面端网页注入了
-  `width=device-width` viewport，fnOS 的 CSS 布局是按桌面宽度（980px+）写死的，
-  改成 device-width 后三个横向元素挤在 360px 里必然互相挤压。
-  同时 `setInitialScale(100)` 锁死 100% 缩放，也让 980px 的桌面页面只能看到左半边。
-
-  回退并重做：
-  1) 彻底移除 `injectViewportOverride()` 方法及其所有调用；
-  2) `setInitialScale(100)` 改为 `setInitialScale(0)`，让 WebView 配合
-     `setLoadWithOverviewMode(true)` 自动算 "整页塞进屏幕" 的缩放比例；
-  3) 现在桌面端页面（fnOS）会完整呈现左侧导航 + 中间内容 + 右侧面板，
-     整体等比缩小约 36%，用户可双指捏合放大看细节，跳页缩放自动重置。
-
-### v1.2.04
-
-- 修复：桌面端网页（如飞牛 fnOS）不自动适应手机屏幕。根因是这类页面没有
-  `<meta name="viewport">` 声明，WebView 默认用 980px 宽 viewport 渲染后
-  再靠 overview mode 等比缩小到手机宽度，导致页面看起来特别小、
-  横向表格溢出、双指缩放状态还会跨页面"传染"。
-
-  新方案：
-  1) `onPageStarted` 调 `webView.setInitialScale(100)`，用 WebView 原生 API
-     在每次新页面加载时强制重置缩放状态（之前试过用 `visualViewport.setScale`
-     注入 JS，但那是 Chrome 专属 API，在 Android WebView 里完全不生效）；
-  2) `injectViewportOverride()` 在页面无 viewport meta 时注入
-     `width=device-width,initial-scale=1.0`，让页面天然按手机宽度渲染；
-  3) 如果页面已有 viewport 且声明了 width（含固定桌面宽度如 1024），
-     自动覆盖成 device-width；Solarpanel 这种自己带移动端 viewport 的页面
-     不受影响。
-
-### v1.2.03
-
-- 修复：WebView 级别的捏合缩放状态不会随页面导航重置。用户在一个页面把页面缩小后，
-  跳到下一个页面会继承同样的缩小比例，越跳越小，也没有任何重置入口。
-  现在每次 `onPageFinished` 和 SPA 路由切换（`doUpdateVisitedHistory`）后，
-  延迟 100ms 把 `visualViewport.scale` 强制设回 1.0，
-  用户手动缩放仍然可用，但不再跨页面"传染"。
-
-### v1.2.02
-
-- 修复：双指捏合缩放时顶栏疯狂闪烁。根因是 WebView 里缩放也会触发 scroll 事件，
-  `scrollTop` 抖动变化导致 JS hook 向上层上报大量方向相反的 onScroll。
-  现在通过 touch 触点数量 + `visualViewport.scale` 识别捏合手势，缩放期间屏蔽上报，
-  缩放结束后还有 300ms 冷却，避免收尾回弹误触发。
-- 修复：Android 系统"字体大小"设置（小/大/超大）会被 WebView 继承，导致面板卡片文字
-  溢出或换行错乱。新增 `settings.setTextZoom(100)` 锁定为默认缩放。
-- 修复：自托管面板在反代、容器端口映射等场景下，返回的卡片链接可能写成
-  `http://localhost:8080/xxx` 或 `127.0.0.1`，手机 WebView 会尝试连手机自身的
-  localhost 导致 404。新增 `Urls.rewriteLocalHost()` 在链接调度前把回环 host
-  自动重写成用户配置的服务器地址。
-- 修复：跨域下载（面板在 A 域名、下载链接重定向到 B 域名）时丢失登录 Cookie。
-  原来只取下载目标域名的 Cookie，现在同时取面板域名的 Cookie 一并带上。
-
-### v1.2.01
-
-- 修复：「清除缓存与登录状态」时 Service Worker 注销 / Cache Storage 清空的 JS Promise 异步执行时序问题，
-  原来 Cookie 清理和页面重载会抢在 SW 清理完成之前执行；现在用 Promise.all + JavaScriptInterface 回调
-  确保先清完 SW 再做后续清理，并加 3 秒超时兜底防止 JS 异常时用户卡死。
-- 修复：Android 13+ (API 33) 下载文件时缺少 POST_NOTIFICATIONS 权限导致下载完成无通知，
-  现在在下载前通过 ActivityResultLauncher 运行时请求权限。
-- 修复：深色模式下顶栏品牌色 `#3E7FA8` (亮蓝) 在 `#12161A` 深色背景上过于刺眼，
-  为全部品牌色补充 values-night 深色版本。
-- 修复：onDestroy 中 WebView 清理不彻底——遗漏 `removeAllViews`、`removeJavascriptInterface`，
-  且多余创建了一个临时 `WebViewClient`。同时新增 Handler removeCallbacks 防止 SW 清理超时处理器
-  在 Activity 销毁后残留 MessageQueue 中。
-- 改进：Release 签名密码从硬编码改为优先读取环境变量 `SOLARPANEL_KEYSTORE_PASSWORD`，
-  未配置时回退为仓库内固定密码，同时同步更新 GitHub Actions workflow 支持 Secret 注入。
 
 ### v1.2.0
 
