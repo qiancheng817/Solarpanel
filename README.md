@@ -1,6 +1,7 @@
 # Solarpanel
 
 安卓客户端导航面板，来自 https://github.com/Ozero-top/Solar-Panel
+感谢项目原作者帮忙改代码实现缩放等各种功能！！！
 
 这是一个用 WebView 封装的轻量外壳，把你部署在飞牛 / NAS 上的 Solarpanel 变成手机上可以一键打开的独立应用。
 
